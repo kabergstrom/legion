@@ -4,7 +4,7 @@ use legion::prelude::*;
 struct Pos(f32, f32, f32);
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Vel(f32, f32, f32);
-#[cfg(not(feature = "blanked-impl-comp"))]
+#[cfg(not(feature = "blanket-impl-comp"))]
 mod comp_impl {
     use super::*;
     impl DefaultComponentImpl for Pos {}
