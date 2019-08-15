@@ -1215,9 +1215,10 @@ macro_rules! impl_component_source {
 
                     while let Some(($( $id, )*)) = { if chunk.is_full() { None } else { self.source.next() } } {
                         let entity = allocator.create_entity();
+                        let idx = entities.len();
                         entities.push(entity);
                         $(
-                            std::ptr::write($ty.as_ptr().offset(count as isize), $id);
+                            std::ptr::write($ty.as_ptr().offset(idx as isize), $id);
                         )*
                         count += 1;
                     }
