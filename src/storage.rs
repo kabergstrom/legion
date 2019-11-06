@@ -39,7 +39,7 @@ fn next_version() -> u64 {
 #[cfg(not(feature = "ffi"))]
 /// A type ID identifying a component type.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct ComponentTypeId(TypeId);
+pub struct ComponentTypeId(pub TypeId);
 
 #[cfg(not(feature = "ffi"))]
 impl ComponentTypeId {
@@ -50,7 +50,7 @@ impl ComponentTypeId {
 #[cfg(feature = "ffi")]
 /// A type ID identifying a component type.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct ComponentTypeId(TypeId, u32);
+pub struct ComponentTypeId(pub TypeId, pub u32);
 
 #[cfg(feature = "ffi")]
 impl ComponentTypeId {
@@ -61,7 +61,7 @@ impl ComponentTypeId {
 #[cfg(not(feature = "ffi"))]
 /// A type ID identifying a tag type.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct TagTypeId(TypeId);
+pub struct TagTypeId(pub TypeId);
 
 #[cfg(not(feature = "ffi"))]
 impl TagTypeId {
@@ -72,7 +72,7 @@ impl TagTypeId {
 #[cfg(feature = "ffi")]
 /// A type ID identifying a tag type.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct TagTypeId(TypeId, u32);
+pub struct TagTypeId(pub TypeId, pub u32);
 
 #[cfg(feature = "ffi")]
 impl TagTypeId {
