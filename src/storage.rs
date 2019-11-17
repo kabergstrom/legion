@@ -258,9 +258,11 @@ impl TagMeta {
         }
     }
 
-    pub(crate) fn equals(&self, a: *const u8, b: *const u8) -> bool { (self.eq_fn)(a, b) }
+    pub(crate) unsafe fn equals(&self, a: *const u8, b: *const u8) -> bool { (self.eq_fn)(a, b) }
 
-    pub(crate) fn clone(&self, src: *const u8, dst: *mut u8) { (self.clone_fn)(src, dst) }
+    pub(crate) unsafe fn clone(&self, src: *const u8, dst: *mut u8) { (self.clone_fn)(src, dst) }
+
+    pub(crate) unsafe fn drop(&self, val: *mut u8) { self.drop_fn.map(|drop_fn| (drop_fn)(val)); }
 
     pub(crate) fn layout(&self) -> std::alloc::Layout {
         unsafe { std::alloc::Layout::from_size_align_unchecked(self.size, self.align) }
@@ -286,6 +288,10 @@ impl ComponentMeta {
             drop_fn: Some(|ptr| unsafe { std::ptr::drop_in_place(ptr as *mut T) }),
         }
     }
+
+    pub(crate) fn size(&self) -> usize { self.size }
+
+    pub(crate) fn align(&self) -> usize { self.align }
 }
 
 /// Describes the layout of an archetype, including what components
@@ -598,7 +604,7 @@ impl ArchetypeData {
         self.chunk_sets.len() - 1
     }
 
-    /// Finds a chunk with space free for at least one entity, creating one if needed.
+    /// Finds a chunk with space free for at least `minimum_space` entities, creating a chunk if needed.
     pub(crate) fn get_free_chunk(&mut self, set_index: usize, minimum_space: usize) -> usize {
         let count = {
             let chunks = &mut self.chunk_sets[set_index];
@@ -1249,7 +1255,7 @@ pub struct TagStorage {
 }
 
 impl TagStorage {
-    fn new(element: TagMeta) -> Self {
+    pub(crate) fn new(element: TagMeta) -> Self {
         let capacity = if element.size == 0 { !0 } else { 4 };
 
         let ptr = unsafe {
@@ -1341,6 +1347,12 @@ impl TagStorage {
             "incompatible element data size"
         );
         std::slice::from_raw_parts(self.ptr.as_ptr() as *const T, self.len)
+    }
+
+    /// Drop the storage without dropping the tags contained in the storage
+    pub(crate) fn forget_data(mut self) {
+        // this is a bit of a hack, but it makes the Drop impl not drop the elements
+        self.element.drop_fn = None;
     }
 
     fn grow(&mut self) {
