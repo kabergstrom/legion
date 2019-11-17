@@ -6,17 +6,23 @@ use crate::filter::{
     ArchetypeFilterData, ChunkFilterData, ChunksetFilterData, EntityFilter, Filter,
 };
 use crate::iterator::FissileIterator;
+use crate::query::ReadOnly;
 use crate::query::{
     Chunk, ChunkDataIter, ChunkEntityIter, ChunkViewIter, Query, Read, View, Write,
 };
 use crate::resource::{Resource, ResourceSet, ResourceTypeId};
+use crate::schedule::ArchetypeAccess;
 use crate::schedule::{Runnable, Schedulable};
+use crate::storage::Tag;
 use crate::storage::{Component, ComponentTypeId, TagTypeId};
 use crate::world::World;
 use bit_set::BitSet;
 use derivative::Derivative;
 use shrinkwraprs::Shrinkwrap;
+use std::any::TypeId;
+use std::borrow::Cow;
 use std::marker::PhantomData;
+use tracing::{debug, info, span, Level};
 
 /// Structure used by `SystemAccess` for describing access to the provided `T`
 #[derive(Derivative, Debug, Clone)]
@@ -51,7 +57,6 @@ where
     V: for<'v> View<'v>,
     F: EntityFilter,
 {
-    world: *const World,
     query: *mut Query<V, F>,
 }
 
@@ -68,9 +73,8 @@ where
     F: EntityFilter,
 {
     /// Safety: input references might not outlive a created instance of `PreparedQuery`.
-    unsafe fn new(world: &World, query: &mut Query<V, F>) -> Self {
+    unsafe fn new(query: &mut Query<V, F>) -> Self {
         Self {
-            world: world as *const World,
             query: query as *mut Query<V, F>,
         }
     }
@@ -79,93 +83,387 @@ where
     // in user's hands and access to internal pointers is impossible. There is no way to move the object out
     // of mutable reference through public API, because there is no way to get access to more than a single instance at a time.
     // The unsafety is an implementation detail. It can be fully safe once GATs are in the language.
+
     /// Gets an iterator which iterates through all chunks that match the query.
+    /// Does not perform static borrow checking.
+    ///
+    /// # Safety
+    ///
+    /// Incorrectly accessing components that are already borrowed elsewhere is undefined behavior.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if other code is concurrently accessing the same components.
     #[inline]
+    pub unsafe fn iter_chunks_unchecked<'a, 'b>(
+        &'b mut self,
+        world: &PreparedWorld,
+    ) -> ChunkViewIter<'a, 'b, V, F::ArchetypeFilter, F::ChunksetFilter, F::ChunkFilter> {
+        (&mut *self.query).iter_chunks_unchecked(&*world.world)
+    }
+
+    /// Gets an iterator which iterates through all chunks that match the query.
+    pub fn iter_chunks_immutable<'a, 'b>(
+        &'b mut self,
+        world: &PreparedWorld,
+    ) -> ChunkViewIter<'a, 'b, V, F::ArchetypeFilter, F::ChunksetFilter, F::ChunkFilter>
+    where
+        V: ReadOnly,
+    {
+        // safe because the view can only read data immutably
+        unsafe { self.iter_chunks_unchecked(world) }
+    }
+
+    /// Gets an iterator which iterates through all chunks that match the query.
     pub fn iter_chunks<'a, 'b>(
         &'b mut self,
+        world: &mut PreparedWorld,
     ) -> ChunkViewIter<'a, 'b, V, F::ArchetypeFilter, F::ChunksetFilter, F::ChunkFilter> {
-        unsafe { (&mut *self.query).iter_chunks(&*self.world) }
+        // safe because the &mut PreparedWorld ensures exclusivity
+        unsafe { self.iter_chunks_unchecked(world) }
+    }
+
+    /// Gets an iterator which iterates through all entity data that matches the query, and also yields the the `Entity` IDs.
+    /// Does not perform static borrow checking.
+    ///
+    /// # Safety
+    ///
+    /// Incorrectly accessing components that are already borrowed elsewhere is undefined behavior.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if other code is concurrently accessing the same components.
+    #[inline]
+    pub unsafe fn iter_entities_unchecked<'a, 'b>(
+        &'b mut self,
+        world: &PreparedWorld,
+    ) -> ChunkEntityIter<
+        'a,
+        V,
+        ChunkViewIter<'a, 'b, V, F::ArchetypeFilter, F::ChunksetFilter, F::ChunkFilter>,
+    > {
+        (&mut *self.query).iter_entities_unchecked(&*world.world)
+    }
+
+    /// Gets an iterator which iterates through all entity data that matches the query, and also yields the the `Entity` IDs.
+    #[inline]
+    pub fn iter_entities_immutable<'a, 'b>(
+        &'b mut self,
+        world: &PreparedWorld,
+    ) -> ChunkEntityIter<
+        'a,
+        V,
+        ChunkViewIter<'a, 'b, V, F::ArchetypeFilter, F::ChunksetFilter, F::ChunkFilter>,
+    >
+    where
+        V: ReadOnly,
+    {
+        // safe because the view can only read data immutably
+        unsafe { self.iter_entities_unchecked(world) }
     }
 
     /// Gets an iterator which iterates through all entity data that matches the query, and also yields the the `Entity` IDs.
     #[inline]
     pub fn iter_entities<'a, 'b>(
         &'b mut self,
+        world: &mut PreparedWorld,
     ) -> ChunkEntityIter<
         'a,
         V,
         ChunkViewIter<'a, 'b, V, F::ArchetypeFilter, F::ChunksetFilter, F::ChunkFilter>,
     > {
-        unsafe { (&mut *self.query).iter_entities(&*self.world) }
+        // safe because the &mut PreparedWorld ensures exclusivity
+        unsafe { self.iter_entities_unchecked(world) }
+    }
+
+    /// Gets an iterator which iterates through all entity data that matches the query.
+    /// Does not perform static borrow checking.
+    ///
+    /// # Safety
+    ///
+    /// Incorrectly accessing components that are already borrowed elsewhere is undefined behavior.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if other code is concurrently accessing the same components.
+    #[inline]
+    pub unsafe fn iter_unchecked<'a, 'data>(
+        &'a mut self,
+        world: &PreparedWorld,
+    ) -> ChunkDataIter<
+        'data,
+        V,
+        ChunkViewIter<'data, 'a, V, F::ArchetypeFilter, F::ChunksetFilter, F::ChunkFilter>,
+    > {
+        (&mut *self.query).iter_unchecked(&*world.world)
+    }
+
+    /// Gets an iterator which iterates through all entity data that matches the query.
+    #[inline]
+    pub fn iter_immutable<'a, 'data>(
+        &'a mut self,
+        world: &PreparedWorld,
+    ) -> ChunkDataIter<
+        'data,
+        V,
+        ChunkViewIter<'data, 'a, V, F::ArchetypeFilter, F::ChunksetFilter, F::ChunkFilter>,
+    >
+    where
+        V: ReadOnly,
+    {
+        // safe because the view can only read data immutably
+        unsafe { self.iter_unchecked(world) }
     }
 
     /// Gets an iterator which iterates through all entity data that matches the query.
     #[inline]
     pub fn iter<'a, 'data>(
         &'a mut self,
+        world: &mut PreparedWorld,
     ) -> ChunkDataIter<
         'data,
         V,
         ChunkViewIter<'data, 'a, V, F::ArchetypeFilter, F::ChunksetFilter, F::ChunkFilter>,
     > {
-        unsafe { (&mut *self.query).iter(&*self.world) }
+        // safe because the &mut PreparedWorld ensures exclusivity
+        unsafe { self.iter_unchecked(world) }
     }
 
     /// Iterates through all entity data that matches the query.
+    /// Does not perform static borrow checking.
+    ///
+    /// # Safety
+    ///
+    /// Incorrectly accessing components that are already borrowed elsewhere is undefined behavior.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if other code is concurrently accessing the same components.
     #[inline]
-    pub fn for_each<'a, 'data, T>(&'a mut self, f: T)
+    pub unsafe fn for_each_unchecked<'a, 'data, T>(&'a mut self, world: &PreparedWorld, f: T)
     where
         T: Fn(<<V as View<'data>>::Iter as Iterator>::Item),
     {
-        unsafe { (&mut *self.query).for_each(&*self.world, f) }
+        (&mut *self.query).for_each_unchecked(&*world.world, f)
+    }
+
+    /// Iterates through all entity data that matches the query.
+    #[inline]
+    pub fn for_each_immutable<'a, 'data, T>(&'a mut self, world: &PreparedWorld, f: T)
+    where
+        T: Fn(<<V as View<'data>>::Iter as Iterator>::Item),
+        V: ReadOnly,
+    {
+        // safe because the view can only read data immutably
+        unsafe { self.for_each_unchecked(world, f) }
+    }
+
+    /// Iterates through all entity data that matches the query.
+    #[inline]
+    pub fn for_each<'a, 'data, T>(&'a mut self, world: &mut PreparedWorld, f: T)
+    where
+        T: Fn(<<V as View<'data>>::Iter as Iterator>::Item),
+    {
+        // safe because the &mut PreparedWorld ensures exclusivity
+        unsafe { self.for_each_unchecked(world, f) }
+    }
+
+    /// Iterates through all entity data that matches the query.
+    /// Does not perform static borrow checking.
+    ///
+    /// # Safety
+    ///
+    /// Incorrectly accessing components that are already borrowed elsewhere is undefined behavior.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if other code is concurrently accessing the same components.
+    #[cfg(feature = "par-iter")]
+    #[inline]
+    pub unsafe fn for_each_entities_unchecked<'a, 'data, T>(
+        &'a mut self,
+        world: &PreparedWorld,
+        f: T,
+    ) where
+        T: Fn((Entity, <<V as View<'data>>::Iter as Iterator>::Item)),
+    {
+        (&mut *self.query).for_each_entities_unchecked(&*world.world, f)
     }
 
     /// Iterates through all entity data that matches the query.
     #[cfg(feature = "par-iter")]
-    pub fn for_each_entities<'a, 'data, T>(&'a mut self, f: T)
+    #[inline]
+    pub fn for_each_entities_immutable<'a, 'data, T>(&'a mut self, world: &PreparedWorld, f: T)
+    where
+        T: Fn((Entity, <<V as View<'data>>::Iter as Iterator>::Item)),
+        V: ReadOnly,
+    {
+        // safe because the view can only read data immutably
+        unsafe { self.for_each_entities_unchecked(world, f) }
+    }
+
+    /// Iterates through all entity data that matches the query.
+    #[cfg(feature = "par-iter")]
+    #[inline]
+    pub fn for_each_entities<'a, 'data, T>(&'a mut self, world: &mut PreparedWorld, f: T)
     where
         T: Fn((Entity, <<V as View<'data>>::Iter as Iterator>::Item)),
     {
-        unsafe { (&mut *self.query).for_each_entities(&*self.world, f) }
+        // safe because the &mut PreparedWorld ensures exclusivity
+        unsafe { self.for_each_entities_unchecked(world, f) }
     }
 
-    /// Iterates through all entities that matches the query in parallel by chunk
+    /// Iterates through all entities that matches the query in parallel by chunk.
+    /// Does not perform static borrow checking.
+    ///
+    /// # Safety
+    ///
+    /// Incorrectly accessing components that are already borrowed elsewhere is undefined behavior.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if other code is concurrently accessing the same components.
     #[cfg(feature = "par-iter")]
     #[inline]
-    pub fn par_entities_for_each<'a, T>(&'a mut self, f: T)
+    pub unsafe fn par_entities_for_each_unchecked<'a, T>(&'a mut self, world: &PreparedWorld, f: T)
     where
         T: Fn((Entity, <<V as View<'a>>::Iter as Iterator>::Item)) + Send + Sync,
         <F::ArchetypeFilter as Filter<ArchetypeFilterData<'a>>>::Iter: FissileIterator,
         <F::ChunksetFilter as Filter<ChunksetFilterData<'a>>>::Iter: FissileIterator,
         <F::ChunkFilter as Filter<ChunkFilterData<'a>>>::Iter: FissileIterator,
     {
-        unsafe { (&mut *self.query).par_entities_for_each(&*self.world, f) }
+        (&mut *self.query).par_entities_for_each_unchecked(&*world.world, f)
+    }
+
+    /// Iterates through all entities that matches the query in parallel by chunk.
+    #[cfg(feature = "par-iter")]
+    #[inline]
+    pub fn par_entities_for_each_immutable<'a, T>(&'a mut self, world: &PreparedWorld, f: T)
+    where
+        T: Fn((Entity, <<V as View<'a>>::Iter as Iterator>::Item)) + Send + Sync,
+        <F::ArchetypeFilter as Filter<ArchetypeFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunksetFilter as Filter<ChunksetFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunkFilter as Filter<ChunkFilterData<'a>>>::Iter: FissileIterator,
+        V: ReadOnly,
+    {
+        // safe because the view can only read data immutably
+        unsafe { self.par_entities_for_each_unchecked(world, f) }
+    }
+
+    /// Iterates through all entities that matches the query in parallel by chunk.
+    #[cfg(feature = "par-iter")]
+    #[inline]
+    pub fn par_entities_for_each<'a, T>(&'a mut self, world: &mut PreparedWorld, f: T)
+    where
+        T: Fn((Entity, <<V as View<'a>>::Iter as Iterator>::Item)) + Send + Sync,
+        <F::ArchetypeFilter as Filter<ArchetypeFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunksetFilter as Filter<ChunksetFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunkFilter as Filter<ChunkFilterData<'a>>>::Iter: FissileIterator,
+    {
+        // safe because the &mut PreparedWorld ensures exclusivity
+        unsafe { self.par_entities_for_each_unchecked(world, f) }
     }
 
     /// Iterates through all entity data that matches the query in parallel.
+    /// Does not perform static borrow checking.
+    ///
+    /// # Safety
+    ///
+    /// Incorrectly accessing components that are already borrowed elsewhere is undefined behavior.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if other code is concurrently accessing the same components.
     #[cfg(feature = "par-iter")]
     #[inline]
-    pub fn par_for_each<'a, T>(&'a mut self, f: T)
+    pub unsafe fn par_for_each_unchecked<'a, T>(&'a mut self, world: &PreparedWorld, f: T)
     where
         T: Fn(<<V as View<'a>>::Iter as Iterator>::Item) + Send + Sync,
         <F::ArchetypeFilter as Filter<ArchetypeFilterData<'a>>>::Iter: FissileIterator,
         <F::ChunksetFilter as Filter<ChunksetFilterData<'a>>>::Iter: FissileIterator,
         <F::ChunkFilter as Filter<ChunkFilterData<'a>>>::Iter: FissileIterator,
     {
-        unsafe { (&mut *self.query).par_for_each(&*self.world, f) }
+        (&mut *self.query).par_for_each_unchecked(&*world.world, f)
+    }
+
+    /// Iterates through all entity data that matches the query in parallel.
+    #[cfg(feature = "par-iter")]
+    #[inline]
+    pub fn par_for_each_immutable<'a, T>(&'a mut self, world: &PreparedWorld, f: T)
+    where
+        T: Fn(<<V as View<'a>>::Iter as Iterator>::Item) + Send + Sync,
+        <F::ArchetypeFilter as Filter<ArchetypeFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunksetFilter as Filter<ChunksetFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunkFilter as Filter<ChunkFilterData<'a>>>::Iter: FissileIterator,
+        V: ReadOnly,
+    {
+        // safe because the view can only read data immutably
+        unsafe { self.par_for_each_unchecked(world, f) }
+    }
+
+    /// Iterates through all entity data that matches the query in parallel.
+    #[cfg(feature = "par-iter")]
+    #[inline]
+    pub fn par_for_each<'a, T>(&'a mut self, world: &mut PreparedWorld, f: T)
+    where
+        T: Fn(<<V as View<'a>>::Iter as Iterator>::Item) + Send + Sync,
+        <F::ArchetypeFilter as Filter<ArchetypeFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunksetFilter as Filter<ChunksetFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunkFilter as Filter<ChunkFilterData<'a>>>::Iter: FissileIterator,
+    {
+        // safe because the &mut PreparedWorld ensures exclusivity
+        unsafe { self.par_for_each_unchecked(world, f) }
     }
 
     /// Gets a parallel iterator of chunks that match the query.
+    /// Does not perform static borrow checking.
+    ///
+    /// # Safety
+    ///
+    /// Incorrectly accessing components that are already borrowed elsewhere is undefined behavior.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if other code is concurrently accessing the same components.
     #[cfg(feature = "par-iter")]
     #[inline]
-    pub fn par_for_each_chunk<'a, T>(&'a mut self, f: T)
+    pub unsafe fn par_for_each_chunk_unchecked<'a, T>(&'a mut self, world: &PreparedWorld, f: T)
     where
         T: Fn(Chunk<'a, V>) + Send + Sync,
         <F::ArchetypeFilter as Filter<ArchetypeFilterData<'a>>>::Iter: FissileIterator,
         <F::ChunksetFilter as Filter<ChunksetFilterData<'a>>>::Iter: FissileIterator,
         <F::ChunkFilter as Filter<ChunkFilterData<'a>>>::Iter: FissileIterator,
     {
-        unsafe { (&mut *self.query).par_for_each_chunk(&*self.world, f) }
+        (&mut *self.query).par_for_each_chunk_unchecked(&*world.world, f)
+    }
+
+    /// Gets a parallel iterator of chunks that match the query.
+    #[cfg(feature = "par-iter")]
+    #[inline]
+    pub fn par_for_each_chunk_immutable<'a, T>(&'a mut self, world: &PreparedWorld, f: T)
+    where
+        T: Fn(Chunk<'a, V>) + Send + Sync,
+        <F::ArchetypeFilter as Filter<ArchetypeFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunksetFilter as Filter<ChunksetFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunkFilter as Filter<ChunkFilterData<'a>>>::Iter: FissileIterator,
+        V: ReadOnly,
+    {
+        // safe because the view can only read data immutably
+        unsafe { self.par_for_each_chunk_unchecked(world, f) }
+    }
+
+    /// Gets a parallel iterator of chunks that match the query.
+    #[cfg(feature = "par-iter")]
+    #[inline]
+    pub fn par_for_each_chunk<'a, T>(&'a mut self, world: &mut PreparedWorld, f: T)
+    where
+        T: Fn(Chunk<'a, V>) + Send + Sync,
+        <F::ArchetypeFilter as Filter<ArchetypeFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunksetFilter as Filter<ChunksetFilterData<'a>>>::Iter: FissileIterator,
+        <F::ChunkFilter as Filter<ChunkFilterData<'a>>>::Iter: FissileIterator,
+    {
+        // safe because the &mut PreparedWorld ensures exclusivity
+        unsafe { self.par_for_each_chunk_unchecked(world, f) }
     }
 }
 
@@ -182,7 +480,7 @@ pub trait QuerySet: Send + Sync {
     /// # Safety
     /// prepare call doesn't respect lifetimes of `self` and `world`.
     /// The returned value cannot outlive them.
-    unsafe fn prepare(&mut self, world: &World) -> Self::PreparedQueries;
+    unsafe fn prepare(&mut self) -> Self::PreparedQueries;
     // fn unprepare(prepared: Self::PreparedQueries) -> Self;
 }
 
@@ -204,9 +502,9 @@ macro_rules! impl_queryset_tuple {
                         $ty.filter.iter_archetype_indexes(storage).for_each(|id| { bitset.insert(id); });
                     )*
                 }
-                unsafe fn prepare(&mut self, world: &World) -> Self::PreparedQueries {
+                unsafe fn prepare(&mut self) -> Self::PreparedQueries {
                     let ($($ty,)*) = self;
-                    ($(PreparedQuery::<[<$ty V>], [<$ty F>]>::new(world, $ty),)*)
+                    ($(PreparedQuery::<[<$ty V>], [<$ty F>]>::new($ty),)*)
                 }
             }
         }
@@ -216,7 +514,7 @@ macro_rules! impl_queryset_tuple {
 impl QuerySet for () {
     type PreparedQueries = ();
     fn filter_archetypes(&mut self, _: &World, _: &mut BitSet) {}
-    unsafe fn prepare(&mut self, _: &World) {}
+    unsafe fn prepare(&mut self) {}
 }
 
 impl<AV, AF> QuerySet for Query<AV, AF>
@@ -231,9 +529,7 @@ where
             bitset.insert(id);
         });
     }
-    unsafe fn prepare(&mut self, world: &World) -> Self::PreparedQueries {
-        PreparedQuery::<AV, AF>::new(world, self)
-    }
+    unsafe fn prepare(&mut self) -> Self::PreparedQueries { PreparedQuery::<AV, AF>::new(self) }
 }
 
 impl_queryset_tuple!(A);
@@ -269,12 +565,22 @@ impl_queryset_tuple!(A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T,
 pub struct PreparedWorld {
     world: *const World,
     access: *const Access<ComponentTypeId>,
+    archetypes: Option<*const BitSet>,
 }
 impl PreparedWorld {
-    unsafe fn new(world: &World, access: &Access<ComponentTypeId>) -> Self {
+    unsafe fn new(
+        world: &World,
+        access: &Access<ComponentTypeId>,
+        archetypes: &ArchetypeAccess,
+    ) -> Self {
         Self {
             world: world as *const World,
             access: access as *const Access<ComponentTypeId>,
+            archetypes: if let ArchetypeAccess::Some(ref bitset) = archetypes {
+                Some(bitset as *const BitSet)
+            } else {
+                None
+            },
         }
     }
 }
@@ -284,27 +590,43 @@ unsafe impl Send for PreparedWorld {}
 
 // TODO: these assertions should have better errors
 impl PreparedWorld {
-    /// Borrows component data for the given entity.
-    ///
-    /// Returns `Some(data)` if the entity was found and contains the specified data.
-    /// Otherwise `None` is returned.
-    ///
-    /// # Panics
-    ///
-    /// This function borrows all components of type `T` in the world. It may panic if
-    /// any other code is currently borrowing `T` mutable or if the component was not declared
-    /// as written by this system.
-    #[inline]
-    pub fn get_component<T: Component>(&self, entity: Entity) -> Option<Ref<Shared, T>> {
-        if !unsafe { (&*self.access) }
-            .reads
-            .contains(&ComponentTypeId::of::<T>())
-        {
-            panic!("You attempted to fetch a component which was not declared with `read_component` on the system. \
-            Use SystemBuilder::read_component to add this access to: {}", std::any::type_name::<T>())
+    fn validate_archetype_access(&self, entity: Entity) -> bool {
+        unsafe {
+            if let Some(archetypes) = self.archetypes {
+                if let Some(location) = (*self.world).entity_allocator.get_location(entity.index())
+                {
+                    return (*archetypes).contains(location.archetype());
+                }
+            }
         }
 
-        unsafe { (&*self.world) }.get_component::<T>(entity)
+        true
+    }
+
+    fn validate_reads<T: Component>(&self, entity: Entity) {
+        unsafe {
+            if !(*self.access).reads.contains(&ComponentTypeId::of::<T>())
+                || !self.validate_archetype_access(entity)
+            {
+                panic!("Attempted to read a component that this system does not have declared access to. \
+                Consider adding a query which contains `{}` and this entity in its result set to the system, \
+                or use `SystemBuilder::read_component` to declare global access.",
+                std::any::type_name::<T>());
+            }
+        }
+    }
+
+    fn validate_writes<T: Component>(&self, entity: Entity) {
+        unsafe {
+            if !(*self.access).writes.contains(&ComponentTypeId::of::<T>())
+                || !self.validate_archetype_access(entity)
+            {
+                panic!("Attempted to write to a component that this system does not have declared access to. \
+                Consider adding a query which contains `{}` and this entity in its result set to the system, \
+                or use `SystemBuilder::write_component` to declare global access.",
+                std::any::type_name::<T>());
+            }
+        }
     }
 
     /// Borrows component data for the given entity.
@@ -314,20 +636,97 @@ impl PreparedWorld {
     ///
     /// # Panics
     ///
-    /// This function borrows all components of type `T` in the world. It may panic if
-    /// any other code is currently borrowing `T` mutable or if the component was not declared
+    /// This function may panic if the component was not declared as read by this system.
+    #[inline]
+    pub fn get_component<T: Component>(&self, entity: Entity) -> Option<Ref<Shared, T>> {
+        self.validate_reads::<T>(entity);
+        unsafe { (*self.world).get_component::<T>(entity) }
+    }
+
+    /// Borrows component data for the given entity. Does not perform static borrow checking.
+    ///
+    /// Returns `Some(data)` if the entity was found and contains the specified data.
+    /// Otherwise `None` is returned.
+    ///
+    /// # Safety
+    ///
+    /// Accessing a component which is already being concurrently accessed elsewhere is undefined behavior.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if any other code is currently borrowing `T` mutable or if the component was not declared
     /// as written by this system.
     #[inline]
-    pub fn get_component_mut<T: Component>(&self, entity: Entity) -> Option<RefMut<Exclusive, T>> {
-        if !unsafe { (&*self.access) }
-            .writes
-            .contains(&ComponentTypeId::of::<T>())
-        {
-            panic!("You attempted to fetch a mutable component which was not declared with `write_component` on the system. \
-            Use SystemBuilder::write_component to add this access to: {}", std::any::type_name::<T>())
-        }
+    pub unsafe fn get_component_mut_unchecked<T: Component>(
+        &self,
+        entity: Entity,
+    ) -> Option<RefMut<Exclusive, T>> {
+        self.validate_writes::<T>(entity);
+        (*self.world).get_component_mut_unchecked::<T>(entity)
+    }
 
-        unsafe { (&*self.world) }.get_component_mut::<T>(entity)
+    /// Mutably borrows entity data for the given entity.
+    ///
+    /// Returns `Some(data)` if the entity was found and contains the specified data.
+    /// Otherwise `None` is returned.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if the component was not declared as written by this system.
+    #[inline]
+    pub fn get_component_mut<T: Component>(
+        &mut self,
+        entity: Entity,
+    ) -> Option<RefMut<Exclusive, T>> {
+        // safe because the &mut self ensures exclusivity
+        unsafe { self.get_component_mut_unchecked(entity) }
+    }
+
+    /// Gets tag data for the given entity.
+    ///
+    /// Returns `Some(data)` if the entity was found and contains the specified data.
+    /// Otherwise `None` is returned.
+    #[inline]
+    pub fn get_tag<T: Tag>(&self, entity: Entity) -> Option<&T> {
+        unsafe { (*self.world).get_tag(entity) }
+    }
+
+    /// Determines if the given `Entity` is alive within this `World`.
+    #[inline]
+    pub fn is_alive(&self, entity: Entity) -> bool { unsafe { (*self.world).is_alive(entity) } }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SystemId {
+    name: Cow<'static, str>,
+    type_id: TypeId,
+}
+
+struct Unspecified;
+
+impl SystemId {
+    pub fn of<T: 'static>(name: Option<String>) -> Self {
+        Self {
+            name: name
+                .unwrap_or_else(|| std::any::type_name::<T>().to_string())
+                .into(),
+            type_id: TypeId::of::<T>(),
+        }
+    }
+}
+
+impl std::fmt::Display for SystemId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+impl<T: Into<Cow<'static, str>>> From<T> for SystemId {
+    fn from(name: T) -> SystemId {
+        SystemId {
+            name: name.into(),
+            type_id: TypeId::of::<Unspecified>(),
+        }
     }
 }
 
@@ -347,17 +746,17 @@ where
     Q: QuerySet,
     F: SystemDisposable<Resources = R, Queries = Q>,
 {
-    name: String,
+    name: SystemId,
     resources: R,
     queries: AtomicRefCell<Q>,
     run_fn: AtomicRefCell<F>,
-    archetypes: BitSet,
+    archetypes: ArchetypeAccess,
 
     // These are stored statically instead of always iterated and created from the
     // query types, which would make allocations every single request
     access: SystemAccess,
 
-    // We pre-allocate a commnad buffer for ourself. Writes are self-draining so we never have to rellocate.
+    // We pre-allocate a command buffer for ourself. Writes are self-draining so we never have to rellocate.
     command_buffer: AtomicRefCell<CommandBuffer>,
 }
 
@@ -367,7 +766,7 @@ where
     Q: QuerySet,
     F: SystemDisposable<Resources = R, Queries = Q>,
 {
-    fn name(&self) -> &str { &self.name }
+    fn name(&self) -> &SystemId { &self.name }
 
     fn reads(&self) -> (&[ResourceTypeId], &[ComponentTypeId]) {
         (&self.access.resources.reads, &self.access.components.reads)
@@ -380,27 +779,33 @@ where
     }
 
     fn prepare(&mut self, world: &World) {
-        self.queries
-            .get_mut()
-            .filter_archetypes(world, &mut self.archetypes);
+        if let ArchetypeAccess::Some(bitset) = &mut self.archetypes {
+            self.queries.get_mut().filter_archetypes(world, bitset);
+        }
     }
 
-    fn accesses_archetypes(&self) -> &BitSet { &self.archetypes }
+    fn accesses_archetypes(&self) -> &ArchetypeAccess { &self.archetypes }
 
     fn command_buffer_mut(&self) -> RefMut<Exclusive, CommandBuffer> {
         self.command_buffer.get_mut()
     }
 
     fn run(&self, world: &World) {
+        let span = span!(Level::INFO, "System", system = %self.name);
+        let _guard = span.enter();
+
+        debug!("Initializing");
         let mut resources = R::fetch(&world.resources);
         let mut queries = self.queries.get_mut();
-        let mut prepared_queries = unsafe { queries.prepare(world) };
-        let mut world_shim = unsafe { PreparedWorld::new(world, &self.access.components) };
+        let mut prepared_queries = unsafe { queries.prepare() };
+        let mut world_shim =
+            unsafe { PreparedWorld::new(world, &self.access.components, &self.archetypes) };
 
         // Give the command buffer a new entity block.
         // This should usually just pull a free block, or allocate a new one...
         // TODO: The BlockAllocator should *ensure* keeping at least 1 free block so this prevents an allocation
 
+        info!("Running");
         use std::ops::DerefMut;
         let mut borrow = self.run_fn.get_mut();
         SystemDisposable::run(
@@ -549,24 +954,41 @@ where
 ///            .read_resource::<TestResource>()
 ///            .with_query(<(Read<Position>, Tagged<Model>)>::query()
 ///                         .filter(!tag::<Static>() | changed::<Position>()))
-///            .build(move |commands, prepared_world, resource, queries| {
-///                log::trace!("Hello world");
+///            .build(move |commands, world, resource, queries| {
 ///               let mut count = 0;
 ///                {
-///                    for (entity, pos) in queries.iter_entities() {
+///                    for (entity, pos) in queries.iter_entities(&mut *world) {
 ///
 ///                    }
 ///                }
 ///            });
 /// ```
 pub struct SystemBuilder<Q = (), R = ()> {
-    name: String,
+    name: SystemId,
 
     queries: Q,
     resources: R,
 
     resource_access: Access<ResourceTypeId>,
     component_access: Access<ComponentTypeId>,
+    access_all_archetypes: bool,
+}
+
+impl SystemBuilder<(), ()> {
+    /// Create a new system builder to construct a new system.
+    ///
+    /// Please note, the `name` argument for this method is just for debugging and visualization
+    /// purposes and is not logically used anywhere.
+    pub fn new<T: Into<SystemId>>(name: T) -> Self {
+        Self {
+            name: name.into(),
+            queries: (),
+            resources: (),
+            resource_access: Access::default(),
+            component_access: Access::default(),
+            access_all_archetypes: false,
+        }
+    }
 }
 
 impl<Q, R> SystemBuilder<Q, R>
@@ -574,21 +996,6 @@ where
     Q: 'static + Send + ConsFlatten,
     R: 'static + Send + ConsFlatten,
 {
-    /// Create a new system builder to construct a new system.
-    ///
-    /// Please note, the `name` argument for this method is just for debugging and visualization
-    /// purposes and is not logically used anywhere.
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(name: &str) -> SystemBuilder {
-        SystemBuilder {
-            name: name.to_string(),
-            queries: (),
-            resources: (),
-            resource_access: Access::default(),
-            component_access: Access::default(),
-        }
-    }
-
     /// Defines a query to provide this system for its execution. Multiple queries can be provided,
     /// and queries are cached internally for efficiency for filtering and archetype ID handling.
     ///
@@ -608,11 +1015,11 @@ where
 
         SystemBuilder {
             name: self.name,
-
             queries: ConsAppend::append(self.queries, query),
             resources: self.resources,
             resource_access: self.resource_access,
             component_access: self.component_access,
+            access_all_archetypes: self.access_all_archetypes,
         }
     }
 
@@ -629,12 +1036,12 @@ where
         self.resource_access.reads.push(ResourceTypeId::of::<T>());
 
         SystemBuilder {
-            resources: ConsAppend::append(self.resources, Read::<T>::default()),
             name: self.name,
-
             queries: self.queries,
+            resources: ConsAppend::append(self.resources, Read::<T>::default()),
             resource_access: self.resource_access,
             component_access: self.component_access,
+            access_all_archetypes: self.access_all_archetypes,
         }
     }
 
@@ -651,12 +1058,12 @@ where
         self.resource_access.writes.push(ResourceTypeId::of::<T>());
 
         SystemBuilder {
-            resources: ConsAppend::append(self.resources, Write::<T>::default()),
             name: self.name,
-
             queries: self.queries,
+            resources: ConsAppend::append(self.resources, Write::<T>::default()),
             resource_access: self.resource_access,
             component_access: self.component_access,
+            access_all_archetypes: self.access_all_archetypes,
         }
     }
 
@@ -675,6 +1082,7 @@ where
         T: Component,
     {
         self.component_access.reads.push(ComponentTypeId::of::<T>());
+        self.access_all_archetypes = true;
 
         self
     }
@@ -696,6 +1104,7 @@ where
         self.component_access
             .writes
             .push(ComponentTypeId::of::<T>());
+        self.access_all_archetypes = true;
 
         self
     }
@@ -716,7 +1125,11 @@ where
             run_fn: AtomicRefCell::new(disposable),
             resources: self.resources.flatten(),
             queries: AtomicRefCell::new(self.queries.flatten()),
-            archetypes: BitSet::default(), //TODO:
+            archetypes: if self.access_all_archetypes {
+                ArchetypeAccess::All
+            } else {
+                ArchetypeAccess::Some(BitSet::default())
+            },
             access: SystemAccess {
                 resources: self.resource_access,
                 components: self.component_access,
@@ -759,10 +1172,10 @@ where
         ))
     }
 
-    /// Builds a standard legion `System`. a system is considered a closure for all purposes. This
+    /// Builds a standard legion `System`. A system is considered a closure for all purposes. This
     /// closure is `FnMut`, allowing for capture of variables for tracking state for this system.
     /// Instead of the classic OOP architecture of a system, this lets you still maintain state
-    /// across execution of the systems while leveraging the type simantics of closures for better
+    /// across execution of the systems while leveraging the type semantics of closures for better
     /// ergonomics.
     pub fn build<F>(self, run_fn: F) -> Box<dyn Schedulable>
     where
@@ -781,9 +1194,9 @@ where
     }
 
     /// Builds a system which is not `Schedulable`, as it is not thread safe (!Send and !Sync),
-    /// but still implements all the calling infastructure of the `Runnable` trait. This provides
+    /// but still implements all the calling infrastructure of the `Runnable` trait. This provides
     /// a way for legion consumers to leverage the `System` construction and type-handling of
-    /// this build for thread local systems which cannot leave the main initializating thread.
+    /// this build for thread local systems which cannot leave the main initializing thread.
     pub fn build_thread_local<F>(self, run_fn: F) -> Box<dyn Runnable>
     where
         <R as ConsFlatten>::Output: ResourceSet + Send + Sync,
@@ -801,7 +1214,11 @@ where
             run_fn: AtomicRefCell::new(disposable),
             resources: self.resources.flatten(),
             queries: AtomicRefCell::new(self.queries.flatten()),
-            archetypes: BitSet::default(), //TODO:
+            archetypes: if self.access_all_archetypes {
+                ArchetypeAccess::All
+            } else {
+                ArchetypeAccess::Some(BitSet::default())
+            },
             access: SystemAccess {
                 resources: self.resource_access,
                 components: self.component_access,
@@ -849,7 +1266,11 @@ where
             run_fn: AtomicRefCell::new(disposable),
             resources: self.resources.flatten(),
             queries: AtomicRefCell::new(self.queries.flatten()),
-            archetypes: BitSet::default(), //TODO:
+            archetypes: if self.access_all_archetypes {
+                ArchetypeAccess::All
+            } else {
+                ArchetypeAccess::Some(BitSet::default())
+            },
             access: SystemAccess {
                 resources: self.resource_access,
                 components: self.component_access,
@@ -891,7 +1312,7 @@ mod tests {
 
     #[test]
     fn builder_schedule_execute() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let universe = Universe::new();
         let mut world = universe.create_world();
@@ -925,9 +1346,9 @@ mod tests {
         let system_one = SystemBuilder::<()>::new("TestSystem1")
             .read_resource::<TestResource>()
             .with_query(Read::<Pos>::query())
-            .with_query(Read::<Vel>::query())
+            .with_query(Write::<Vel>::query())
             .build(move |_commands, _world, _resource, _queries| {
-                log::trace!("system_one");
+                tracing::trace!("system_one");
                 system_one_runs
                     .lock()
                     .unwrap()
@@ -939,7 +1360,7 @@ mod tests {
             .write_resource::<TestResourceTwo>()
             .with_query(Read::<Vel>::query())
             .build(move |_commands, _world, _resource, _queries| {
-                log::trace!("system_two");
+                tracing::trace!("system_two");
                 system_two_runs
                     .lock()
                     .unwrap()
@@ -951,7 +1372,7 @@ mod tests {
             .read_resource::<TestResourceTwo>()
             .with_query(Read::<Vel>::query())
             .build(move |_commands, _world, _resource, _queries| {
-                log::trace!("system_three");
+                tracing::trace!("system_three");
                 system_three_runs
                     .lock()
                     .unwrap()
@@ -962,7 +1383,7 @@ mod tests {
             .write_resource::<TestResourceTwo>()
             .with_query(Read::<Vel>::query())
             .build(move |_commands, _world, _resource, _queries| {
-                log::trace!("system_four");
+                tracing::trace!("system_four");
                 system_four_runs
                     .lock()
                     .unwrap()
@@ -976,30 +1397,17 @@ mod tests {
             TestSystems::TestSystemFour,
         ];
 
-        let mut systems = vec![system_one, system_two, system_three, system_four];
+        let systems = vec![system_one, system_two, system_three, system_four];
 
-        #[cfg(feature = "par-iter")]
-        {
-            let pool = rayon::ThreadPoolBuilder::new()
-                .num_threads(8)
-                .build()
-                .unwrap();
-
-            let mut executor = StageExecutor::new(&mut systems, &pool);
-            executor.execute(&mut world);
-        }
-        #[cfg(not(feature = "par-iter"))]
-        {
-            let mut executor = StageExecutor::new(&mut systems);
-            executor.execute(&mut world);
-        }
+        let mut executor = StageExecutor::new(systems);
+        executor.execute(&mut world);
 
         assert_eq!(*(runs.lock().unwrap()), order);
     }
 
     #[test]
     fn builder_create_and_execute() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let universe = Universe::new();
         let mut world = universe.create_world();
@@ -1022,11 +1430,11 @@ mod tests {
             .read_resource::<TestResource>()
             .with_query(Read::<Pos>::query())
             .with_query(Read::<Vel>::query())
-            .build(move |_commands, _world, resource, queries| {
+            .build(move |_commands, world, resource, queries| {
                 assert_eq!(resource.0, 123);
                 let mut count = 0;
                 {
-                    for (entity, pos) in queries.0.iter_entities() {
+                    for (entity, pos) in queries.0.iter_entities_immutable(world) {
                         assert_eq!(expected.get(&entity).unwrap().0, *pos);
                         count += 1;
                     }
@@ -1040,7 +1448,7 @@ mod tests {
 
     #[test]
     fn fnmut_stateful_system_test() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let universe = Universe::new();
         let mut world = universe.create_world();
@@ -1073,10 +1481,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "par-iter")]
+    #[cfg(feature = "par-schedule")]
     fn par_res_write() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         #[derive(Default)]
         struct AtomicRes(AtomicRefCell<AtomicUsize>);
@@ -1114,17 +1522,19 @@ mod tests {
             .build()
             .unwrap();
 
-        println!(
-            "System access: reads[{:?}], writes[{:?}]",
-            system1.reads(),
-            system1.writes()
+        tracing::debug!(
+            reads = ?system1.reads(),
+            writes = ?system1.writes(),
+            "System access"
         );
 
-        let mut systems = [system1, system2, system3];
-        let mut executor = StageExecutor::new(&mut systems, &pool);
-        for _ in 0..1000 {
-            executor.execute(&mut world);
-        }
+        let systems = vec![system1, system2, system3];
+        let mut executor = StageExecutor::new(systems);
+        pool.install(|| {
+            for _ in 0..1000 {
+                executor.execute(&mut world);
+            }
+        });
 
         assert_eq!(
             world
@@ -1139,10 +1549,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "par-iter")]
+    #[cfg(feature = "par-schedule")]
     fn par_res_readwrite() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         #[derive(Default)]
         struct AtomicRes(AtomicRefCell<AtomicUsize>);
@@ -1180,23 +1590,26 @@ mod tests {
             .build()
             .unwrap();
 
-        println!(
-            "System access: reads[{:?}], writes[{:?}]",
-            system1.reads(),
-            system1.writes()
+        tracing::debug!(
+            reads = ?system1.reads(),
+            writes = ?system1.writes(),
+            "System access"
         );
 
-        let mut systems = [system1, system2, system3];
-        let mut executor = StageExecutor::new(&mut systems, &pool);
-        for _ in 0..1000 {
-            executor.execute(&mut world);
-        }
+        let systems = vec![system1, system2, system3];
+        let mut executor = StageExecutor::new(systems);
+        pool.install(|| {
+            for _ in 0..1000 {
+                executor.execute(&mut world);
+            }
+        });
     }
 
     #[test]
-    #[cfg(feature = "par-iter")]
+    #[cfg(feature = "par-schedule")]
+    #[allow(clippy::float_cmp)]
     fn par_comp_readwrite() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let universe = Universe::new();
         let mut world = universe.create_world();
@@ -1221,8 +1634,8 @@ mod tests {
 
         let system1 = SystemBuilder::<()>::new("TestSystem1")
             .with_query(<(Read<Comp1>, Read<Comp2>)>::query())
-            .build(move |_, _, _, query| {
-                query.iter().for_each(|(one, two)| {
+            .build(move |_, world, _, query| {
+                query.iter(world).for_each(|(one, two)| {
                     assert_eq!(one.0, 69.);
                     assert_eq!(one.1, 69.);
                     assert_eq!(one.2, 69.);
@@ -1235,8 +1648,8 @@ mod tests {
 
         let system2 = SystemBuilder::<()>::new("TestSystem2")
             .with_query(<(Write<Comp1>, Read<Comp2>)>::query())
-            .build(move |_, _, _, query| {
-                query.iter().for_each(|(mut one, two)| {
+            .build(move |_, world, _, query| {
+                query.iter(world).for_each(|(mut one, two)| {
                     one.0 = 456.;
                     one.1 = 456.;
                     one.2 = 456.;
@@ -1249,8 +1662,8 @@ mod tests {
 
         let system3 = SystemBuilder::<()>::new("TestSystem3")
             .with_query(<(Write<Comp1>, Write<Comp2>)>::query())
-            .build(move |_, _, _, query| {
-                query.iter().for_each(|(mut one, two)| {
+            .build(move |_, world, _, query| {
+                query.iter(world).for_each(|(mut one, two)| {
                     assert_eq!(one.0, 456.);
                     assert_eq!(one.1, 456.);
                     assert_eq!(one.2, 456.);
@@ -1271,8 +1684,8 @@ mod tests {
 
         let system4 = SystemBuilder::<()>::new("TestSystem4")
             .with_query(<(Read<Comp1>, Read<Comp2>)>::query())
-            .build(move |_, _, _, query| {
-                query.iter().for_each(|(one, two)| {
+            .build(move |_, world, _, query| {
+                query.iter(world).for_each(|(one, two)| {
                     assert_eq!(one.0, 789.);
                     assert_eq!(one.1, 789.);
                     assert_eq!(one.2, 789.);
@@ -1285,8 +1698,8 @@ mod tests {
 
         let system5 = SystemBuilder::<()>::new("TestSystem5")
             .with_query(<(Write<Comp1>, Write<Comp2>)>::query())
-            .build(move |_, _, _, query| {
-                query.iter().for_each(|(mut one, mut two)| {
+            .build(move |_, world, _, query| {
+                query.iter(world).for_each(|(mut one, mut two)| {
                     assert_eq!(one.0, 789.);
                     assert_eq!(one.1, 789.);
                     assert_eq!(one.2, 789.);
@@ -1310,16 +1723,18 @@ mod tests {
             .build()
             .unwrap();
 
-        println!(
-            "System access: reads[{:?}], writes[{:?}]",
-            system1.reads(),
-            system1.writes()
+        tracing::debug!(
+            reads = ?system1.reads(),
+            writes = ?system1.writes(),
+            "System access"
         );
 
-        let mut systems = [system1, system2, system3, system4, system5];
-        let mut executor = StageExecutor::new(&mut systems, &pool);
-        for _ in 0..1000 {
-            executor.execute(&mut world);
-        }
+        let systems = vec![system1, system2, system3, system4, system5];
+        let mut executor = StageExecutor::new(systems);
+        pool.install(|| {
+            for _ in 0..1000 {
+                executor.execute(&mut world);
+            }
+        });
     }
 }

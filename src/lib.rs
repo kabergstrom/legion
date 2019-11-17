@@ -45,15 +45,11 @@
 //! let mut query = <(Write<Position>, Read<Velocity>)>::query();
 //!
 //! // Iterate through all entities that match the query in the world
-//! for (mut pos, vel) in query.iter(&world) {
+//! for (mut pos, vel) in query.iter(&mut world) {
 //!     pos.x += vel.dx;
 //!     pos.y += vel.dy;
 //! }
 //! ```
-//!
-//! # Features
-//!
-//! Legion aims to be a more complete game-ready ECS than many of its predecessors.
 //!
 //! ### Advanced Query Filters
 //!
@@ -82,7 +78,7 @@
 //! // It is possible to specify that entities must contain data beyond that being fetched
 //! let mut query = Read::<Position>::query()
 //!     .filter(component::<Velocity>());
-//! for position in query.iter(&world) {
+//! for position in query.iter(&mut world) {
 //!     // these entities also have `Velocity`
 //! }
 //! ```
@@ -110,7 +106,7 @@
 //! // Filters can be combined with boolean operators
 //! let mut query = Read::<Position>::query()
 //!     .filter(tag::<Static>() | !component::<Velocity>());
-//! for position in query.iter(&world) {
+//! for position in query.iter(&mut world) {
 //!     // these entities are also either marked as `Static`, or do *not* have a `Velocity`
 //! }
 //! ```
@@ -138,7 +134,7 @@
 //! // Filters can filter by specific tag values
 //! let mut query = Read::<Position>::query()
 //!     .filter(tag_value(&Model(3)));
-//! for position in query.iter(&world) {
+//! for position in query.iter(&mut world) {
 //!     // these entities all have tag value `Model(3)`
 //! }
 //! ```
@@ -167,7 +163,7 @@
 //! // has not changed since the last time the query was iterated.
 //! let mut query = <(Read<Position>, Tagged<Model>)>::query()
 //!     .filter(changed::<Position>());
-//! for (pos, model) in query.iter(&world) {
+//! for (pos, model) in query.iter(&mut world) {
 //!     // entities who have changed position
 //! }
 //! ```
@@ -191,7 +187,9 @@
 //!
 //! ### Chunk Iteration
 //!
-//! Entity data is allocated in blocks called "chunks", each approximately containing 64KiB of data. The query API exposes each chunk via 'iter_chunk'. As all entities in a chunk are guarenteed to contain the same set of entity data and shared data values, it is possible to do batch processing via the chunk API.
+//! Entity data is allocated in blocks called "chunks", each approximately containing 64KiB of data.
+//! The query API exposes each chunk via 'iter_chunk'. As all entities in a chunk are guarenteed to contain the same set of entity
+//! data and shared data values, it is possible to do batch processing via the chunk API.
 //!
 //! ```rust
 //! # use legion::prelude::*;
@@ -209,7 +207,7 @@
 //! let mut query = Read::<Transform>::query()
 //!     .filter(tag::<Model>());
 //!
-//! for chunk in query.iter_chunks(&world) {
+//! for chunk in query.iter_chunks(&mut world) {
 //!     // get the chunk's model
 //!     let model: &Model = chunk.tag().unwrap();
 //!
@@ -220,6 +218,14 @@
 //!     render_instanced(model, &transforms);
 //! }
 //! ```
+//!
+//! # Feature Flags
+//!
+//!  * `par-iter`: Enables parallel APIs on queries (enabled by default).
+//!  * `par-schedule`: Configures system schedulers to try and run systems in parallel where possible (enabled by default).
+//!  * `log`: Configures `tracing` to redirect events to the `log` crate. This is a convenience feature for applications
+//!  that use `log` and do not wish to interact with `tracing`.
+//!  * `events`: Enables eventing APIs on worlds (enabled by default).
 #![allow(dead_code)]
 
 pub mod borrow;
@@ -251,9 +257,9 @@ pub mod prelude {
     pub use crate::command::CommandBuffer;
     pub use crate::entity::Entity;
     pub use crate::filter::filter_fns::*;
-    pub use crate::query::{IntoQuery, Query, Read, Tagged, Write};
+    pub use crate::query::{IntoQuery, Query, Read, Tagged, TryRead, TryWrite, Write};
     pub use crate::resource::{ResourceSet, Resources};
-    pub use crate::schedule::{Runnable, Schedulable, StageExecutor};
+    pub use crate::schedule::{Runnable, Schedulable, Stage, StageExecutor, SystemScheduler};
     pub use crate::system::{System, SystemBuilder};
     pub use crate::world::{Universe, World};
     pub use bit_set::BitSet;

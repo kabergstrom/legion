@@ -35,8 +35,9 @@ use std::ptr::NonNull;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use tracing::{info, span, trace, Level};
 
-#[cfg(feature = "par-iter")]
+#[cfg(feature = "events")]
 use rayon::prelude::*;
 
 #[cfg(feature = "events")]
@@ -58,13 +59,16 @@ impl Universe {
     /// Creates a new `Universe`.
     pub fn new() -> Self { Self::default() }
 
-    /// Creates a new `World` within this `Unvierse`.
+    /// Creates a new `World` within this `Universe`.
     ///
     /// Entities inserted into worlds created within the same universe are guarenteed to have
-    /// unique `Entity` IDs, even across worlds.
+    /// unique `Entity` IDs, even across worlds. See also `World::new`.
     pub fn create_world(&self) -> World {
         let id = self.world_count.fetch_add(1, Ordering::SeqCst);
-        let world = World::new(WorldId(id), EntityAllocator::new(self.allocator.clone()));
+        let world =
+            World::new_in_universe(WorldId(id), EntityAllocator::new(self.allocator.clone()));
+
+        info!(world = world.id().0, "Created world");
 
         #[cfg(feature = "events")]
         {
@@ -94,6 +98,10 @@ impl Default for Universe {
 #[derive(Default, Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct WorldId(usize);
 
+impl WorldId {
+    pub fn index(self) -> usize { self.0 }
+}
+
 /// Contains queryable collections of data associated with `Entity`s.
 pub struct World {
     id: WorldId,
@@ -112,7 +120,18 @@ unsafe impl Send for World {}
 unsafe impl Sync for World {}
 
 impl World {
-    fn new(id: WorldId, allocator: EntityAllocator) -> Self {
+    /// Create a new `World` independent of any `Universe`.
+    ///
+    /// `Entity` IDs in such a world will only be unique within that world. See also
+    /// `Universe::create_world`.
+    pub fn new() -> Self {
+        Self::new_in_universe(
+            WorldId(0),
+            EntityAllocator::new(Arc::new(Mutex::new(BlockAllocator::new()))),
+        )
+    }
+
+    fn new_in_universe(id: WorldId, allocator: EntityAllocator) -> Self {
         Self {
             id,
             storage: UnsafeCell::new(Storage::new(id)),
@@ -131,7 +150,7 @@ impl World {
 
     pub(crate) fn storage_mut(&mut self) -> &mut Storage { unsafe { &mut *self.storage.get() } }
 
-    /// Gets the unique ID of this world.
+    /// Gets the unique ID of this world within its universe.
     pub fn id(&self) -> WorldId { self.id }
 
     /// Inserts new entities into the world.
@@ -163,6 +182,9 @@ impl World {
         T: TagSet + TagLayout + for<'a> Filter<ChunksetFilterData<'a>>,
         C: IntoComponentSource,
     {
+        let span = span!(Level::TRACE, "Inserting entities", world = self.id().0);
+        let _guard = span.enter();
+
         // find or create archetype
         let mut components = components.into();
         let archetype_index = self.find_or_create_archetype(&mut tags, &mut components);
@@ -203,7 +225,9 @@ impl World {
 
         let entities = self.entity_allocator.allocation_buffer();
 
-        #[cfg(feature = "events")]
+        trace!(count = entities.len(), "Inserted entities");
+
+        #[cfg(all(feature = "events"))]
         {
             entities.par_iter().for_each(|e| {
                 self.channel
@@ -254,6 +278,8 @@ impl World {
                 self.entity_allocator
                     .set_location(swapped.index(), location);
             }
+
+            trace!(world = self.id().0, ?entity, "Deleted entity");
 
             true
         } else {
@@ -359,12 +385,6 @@ impl World {
             add_tags,
             remove_tags,
         );
-        log::trace!("src  = {:?}", location);
-        log::trace!(
-            "target_arch_index={}, target_chunkset_index={}",
-            target_arch_index,
-            target_chunkset_index
-        );
 
         // Safety Note:
         // It is only safe for us to have 2 &mut references to storage here because
@@ -398,22 +418,9 @@ impl World {
         // move existing data over into new chunk
         if let Some(swapped) = current_chunk.move_entity(target_chunk, location.component()) {
             // update location of any entity that was moved into the previous location
-            log::trace!("SWAP location! {:?}, {:?}", swapped, location);
-
             self.entity_allocator
                 .set_location(swapped.index(), location);
         }
-
-        log::trace!(
-            "Set location! {:?}, {:?}",
-            entity,
-            EntityLocation::new(
-                target_arch_index,
-                target_chunkset_index,
-                target_chunk_index,
-                target_chunk.len() - 1,
-            )
-        );
 
         // record the entity's new location
         self.entity_allocator.set_location(
@@ -429,13 +436,20 @@ impl World {
         target_chunk
     }
 
-    /// Adds a component to an entity, or set's its value if the component is
+    /// Adds a component to an entity, or sets its value if the component is
     /// already present.
     pub fn add_component<T: Component>(&mut self, entity: Entity, component: T) {
         if let Some(mut comp) = self.get_component_mut(entity) {
             *comp = component;
             return;
         }
+
+        trace!(
+            world = self.id().0,
+            ?entity,
+            component = std::any::type_name::<T>(),
+            "Adding component to entity"
+        );
 
         // move the entity into a suitable chunk
         let target_chunk = self.move_entity(
@@ -447,7 +461,8 @@ impl World {
         );
 
         // push new component into chunk
-        let (_, components) = target_chunk.write();
+        let mut writer = target_chunk.writer();
+        let (_, components) = writer.get();
         let slice = [component];
         unsafe {
             let components = &mut *components.get();
@@ -463,17 +478,31 @@ impl World {
     /// Removes a component from an entity.
     pub fn remove_component<T: Component>(&mut self, entity: Entity) {
         if self.get_component::<T>(entity).is_some() {
+            trace!(
+                world = self.id().0,
+                ?entity,
+                component = std::any::type_name::<T>(),
+                "Removing component from entity"
+            );
+
             // move the entity into a suitable chunk
             self.move_entity(entity, &[], &[ComponentTypeId::of::<T>()], &[], &[]);
         }
     }
 
-    /// Adds a tag to an entity, or set's its value if the tag is
+    /// Adds a tag to an entity, or sets its value if the tag is
     /// already present.
     pub fn add_tag<T: Tag>(&mut self, entity: Entity, tag: T) {
         if self.get_tag::<T>(entity).is_some() {
             self.remove_tag::<T>(entity);
         }
+
+        trace!(
+            world = self.id().0,
+            ?entity,
+            tag = std::any::type_name::<T>(),
+            "Adding tag to entity"
+        );
 
         // move the entity into a suitable chunk
         self.move_entity(
@@ -492,6 +521,13 @@ impl World {
     /// Removes a tag from an entity.
     pub fn remove_tag<T: Tag>(&mut self, entity: Entity) {
         if self.get_tag::<T>(entity).is_some() {
+            trace!(
+                world = self.id().0,
+                ?entity,
+                tag = std::any::type_name::<T>(),
+                "Removing tag from entity"
+            );
+
             // move the entity into a suitable chunk
             self.move_entity(entity, &[], &[], &[], &[TagTypeId::of::<T>()]);
         }
@@ -501,11 +537,6 @@ impl World {
     ///
     /// Returns `Some(data)` if the entity was found and contains the specified data.
     /// Otherwise `None` is returned.
-    ///
-    /// # Panics
-    ///
-    /// This function borrows all components of type `T` in the world. It may panic if
-    /// any other code is currently borrowing `T` mutably (such as in a query).
     pub fn get_component<T: Component>(&self, entity: Entity) -> Option<Ref<Shared, T>> {
         if !self.is_alive(entity) {
             return None;
@@ -533,11 +564,17 @@ impl World {
     /// Returns `Some(data)` if the entity was found and contains the specified data.
     /// Otherwise `None` is returned.
     ///
+    /// # Safety
+    ///
+    /// Accessing a component which is already being concurrently accessed elsewhere is undefined behavior.
+    ///
     /// # Panics
     ///
-    /// This function borrows all components of type `T` in the world. It may panic if
-    /// any other code is currently borrowing `T` (such as in a query).
-    pub fn get_component_mut<T: Component>(&self, entity: Entity) -> Option<RefMut<Exclusive, T>> {
+    /// This function may panic if any other code is currently borrowing `T` (such as in a query).
+    pub unsafe fn get_component_mut_unchecked<T: Component>(
+        &self,
+        entity: Entity,
+    ) -> Option<RefMut<Exclusive, T>> {
         if !self.is_alive(entity) {
             return None;
         }
@@ -548,16 +585,31 @@ impl World {
             .chunksets()
             .get(location.set())?
             .get(location.chunk())?;
-        let (slice_borrow, slice) = unsafe {
-            chunk
-                .components(ComponentTypeId::of::<T>())?
-                .data_slice_mut::<T>()
-                .deconstruct()
-        };
+        let (slice_borrow, slice) = chunk
+            .components(ComponentTypeId::of::<T>())?
+            .data_slice_mut::<T>()
+            .deconstruct();
         let component = slice.get_mut(location.component())?;
 
         Some(RefMut::new(slice_borrow, component))
     }
+
+    /// Mutably borrows entity data for the given entity.
+    ///
+    /// Returns `Some(data)` if the entity was found and contains the specified data.
+    /// Otherwise `None` is returned.
+    pub fn get_component_mut<T: Component>(
+        &mut self,
+        entity: Entity,
+    ) -> Option<RefMut<Exclusive, T>> {
+        // safe because the &mut self ensures exclusivity
+        unsafe { self.get_component_mut_unchecked(entity) }
+    }
+
+    /// Mutably borrows entity data for the given entity.
+    ///
+    /// Returns `Some(data)` if the entity was found and contains the specified data.
+    /// Otherwise `None` is returned.
 
     /// Gets tag data for the given entity.
     ///
@@ -586,6 +638,14 @@ impl World {
     /// in one call. Subsequent calls to `defrag` will resume progress from the
     /// previous call.
     pub fn defrag(&mut self, budget: Option<usize>) {
+        let span = span!(
+            Level::INFO,
+            "Defragmenting",
+            world = self.id().0,
+            start_archetype = self.defrag_progress
+        );
+        let _guard = span.enter();
+
         let archetypes = unsafe { &mut *self.storage.get() }.archetypes_mut();
         let mut budget = budget.unwrap_or(std::usize::MAX);
         let start = self.defrag_progress;
@@ -608,6 +668,10 @@ impl World {
     }
 
     pub fn merge(&mut self, world: World) {
+        let span =
+            span!(Level::INFO, "Merging worlds", source = world.id().0, destination = ?self.id());
+        let _guard = span.enter();
+
         self.entity_allocator.merge(world.entity_allocator);
 
         for archetype in unsafe { &mut *world.storage.get() }.drain(..) {
@@ -719,6 +783,10 @@ impl World {
             self.create_chunk_set(archetype, tags)
         }
     }
+}
+
+impl Default for World {
+    fn default() -> Self { Self::new() }
 }
 
 /// Describes the types of a set of components attached to an entity.
@@ -864,7 +932,8 @@ mod tuple_impls {
                     #![allow(unused_unsafe)]
                     #![allow(non_snake_case)]
                     let space = chunk.capacity() - chunk.len();
-                    let (entities, components) = chunk.write();
+                    let mut writer = chunk.writer();
+                    let (entities, components) = writer.get();
                     let mut count = 0;
 
                     unsafe {
@@ -1223,14 +1292,14 @@ mod tests {
 
     #[test]
     fn create_universe() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         Universe::default();
     }
 
     #[test]
     fn create_world() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let universe = Universe::new();
         universe.create_world();
@@ -1238,7 +1307,7 @@ mod tests {
 
     #[test]
     fn insert_many() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1265,7 +1334,7 @@ mod tests {
 
     #[test]
     fn insert() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1278,7 +1347,7 @@ mod tests {
 
     #[test]
     fn get_component() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1310,7 +1379,7 @@ mod tests {
 
     #[test]
     fn get_component_wrong_type() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1323,7 +1392,7 @@ mod tests {
 
     #[test]
     fn get_tag() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1343,7 +1412,7 @@ mod tests {
 
     #[test]
     fn get_tag_wrong_type() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1356,7 +1425,7 @@ mod tests {
 
     #[test]
     fn delete() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1380,7 +1449,7 @@ mod tests {
 
     #[test]
     fn delete_last() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1409,7 +1478,7 @@ mod tests {
 
     #[test]
     fn delete_first() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1438,7 +1507,7 @@ mod tests {
 
     #[test]
     fn add_component() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1465,7 +1534,7 @@ mod tests {
 
     #[test]
     fn remove_component() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1488,7 +1557,7 @@ mod tests {
 
     #[test]
     fn add_tag() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1516,7 +1585,7 @@ mod tests {
 
     #[test]
     fn remove_tag() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let mut world = create();
 
@@ -1543,7 +1612,7 @@ mod tests {
 
     #[test]
     fn add_component2() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = tracing_subscriber::fmt::try_init();
         struct Transform {
             translation: Vec<f32>,
         }
