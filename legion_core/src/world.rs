@@ -301,6 +301,27 @@ impl World {
         }
     }
 
+    fn delete_location(&mut self, location: EntityLocation) {
+        // find entity's chunk
+        let chunk = self
+            .storage_mut()
+            .archetypes_mut()
+            .get_mut(*location.archetype())
+            .unwrap()
+            .chunksets_mut()
+            .get_mut(*location.set())
+            .unwrap()
+            .get_mut(*location.chunk())
+            .unwrap();
+
+        // swap remove with last entity in chunk
+        if let Some(swapped) = chunk.swap_remove(location.component(), true) {
+            // record swapped entity's new location
+            self.entity_locations
+                .set(swapped, location);
+        }
+    }
+
     fn find_chunk_with_delta(
         &mut self,
         source_location: EntityLocation,
@@ -712,6 +733,33 @@ impl World {
     /// Determines if the given `Entity` is alive within this `World`.
     pub fn is_alive(&self, entity: Entity) -> bool { self.entity_allocator.is_alive(entity) }
 
+    /// Returns the entity's component types, if the entity exists.
+    pub fn entity_component_types(
+        &self,
+        entity: Entity,
+    ) -> Option<&[(ComponentTypeId, ComponentMeta)]> {
+        if !self.is_alive(entity) {
+            return None;
+        }
+        let location = self.entity_locations.get(entity);
+        let archetype = location
+            .map(|location| self.storage().archetypes().get(*location.archetype()))
+            .unwrap_or(None);
+        archetype.map(|archetype| archetype.description().components())
+    }
+
+    /// Returns the entity's tag types, if the entity exists.
+    pub fn entity_tag_types(&self, entity: Entity) -> Option<&[(TagTypeId, TagMeta)]> {
+        if !self.is_alive(entity) {
+            return None;
+        }
+        let location = self.entity_locations.get(entity);
+        let archetype = location
+            .map(|location| self.storage().archetypes().get(*location.archetype()))
+            .unwrap_or(None);
+        archetype.map(|archetype| archetype.description().tags())
+    }
+
     /// Iteratively defragments the world's internal memory.
     ///
     /// This compacts entities into fewer more continuous chunks.
@@ -791,6 +839,107 @@ impl World {
             for (entity, location) in archetype.enumerate_entities(target_archetype) {
                 self.entity_locations.set(entity, location);
             }
+        }
+    }
+
+    /// This will *copy* the data from `src_world` into this world. The logic to do the copy is
+    /// delegated to the `clone_impl` provided by the user. In addition to simple copying, it's also
+    /// possible to transform from one type to another. This is useful for cases where you want to
+    /// read from serializable data (like a physics shape definition) and construct something that
+    /// isn't serializable (like a handle to a physics body)
+    ///
+    /// By default, all entities in the new world will be assigned a new Entity. `result_mappings`
+    /// (if not None) will be populated with the old/new Entities, which allows for mapping data
+    /// between the old and new world.
+    ///
+    /// If you want to replace existing entities (for example to hot-reload data from a file,)
+    /// populate `replace_mappings`. For every entry in this map, the key must exist in the source
+    /// world and the value must exist in the destination world. All entities in the destination
+    /// world referenced by this map will be deleted, and the entities copied over will be assigned
+    /// the same entity. If these constraints are not met, this function will panic.
+    pub fn clone_merge<C: CloneMergeImpl>(
+        &mut self,
+        src_world: &World,
+        clone_impl: &C,
+        replace_mappings: Option<&std::collections::HashMap<Entity, Entity>>,
+        mut result_mappings: Option<&mut std::collections::HashMap<Entity, Entity>>,
+    ) {
+        let span = span!(Level::INFO, "CloneMerging worlds", source = src_world.id().0, destination = ?self.id());
+        let _guard = span.enter();
+
+        let src_storage = unsafe { &(*src_world.storage.get()) };
+        let dst_storage = unsafe { &mut (*self.storage.get()) };
+
+        // Erase all entities that are referred to by value. The code following will update the location
+        // of all these entities to point to new, valid locations
+        if let Some(replace_mappings) = replace_mappings {
+            // First check that all the keys exist in the source world. We're assuming the source
+            // data will be available later to replace the data we're about to delete
+            for k in replace_mappings.keys() {
+                if !src_world.entity_allocator.is_alive(*k) {
+                    panic!("clone_merge assumes all entity_mapping keys exist in the source world");
+                }
+            }
+
+            // Delete all the data associated with keys in replace_mappings. This leaves the
+            // associated entities in a dangling state, but we'll fix this later when we copy the
+            // data over
+            for v in replace_mappings.values() {
+                if self.entity_allocator.is_alive(*v) {
+                    let location = self
+                        .entity_locations
+                        .get(*v)
+                        .expect("Failed to get location of live entity");
+                    self.delete_location(location);
+                } else {
+                    panic!("clone_merge assumes all entity_mapping values exist in the destination world");
+                }
+            }
+        }
+
+        // Iterate all archetypes in the src world
+        for src_archetype in src_storage.archetypes() {
+            let archetype_data = ArchetypeFilterData {
+                component_types: self.storage().component_types(),
+                tag_types: self.storage().tag_types(),
+            };
+
+            // Build the archetype that we will write into. The caller of this function provides an
+            // impl to do the clone, optionally transforming components from one type to another
+            let mut dst_archetype = ArchetypeDescription::default();
+            for (from_type_id, _from_meta) in src_archetype.description().components() {
+                let (into_type_id, into_meta) = clone_impl.map_component_type(*from_type_id);
+                dst_archetype.register_component_raw(into_type_id, into_meta);
+            }
+
+            // Find or create the archetype in the destination world
+            let matches = dst_archetype
+                .matches(archetype_data)
+                .matching_indices()
+                .next();
+
+            // If it doesn't exist, allocate it
+            let dst_archetype_index = if let Some(arch_index) = matches {
+                ArchetypeIndex(arch_index)
+            } else {
+                dst_storage.alloc_archetype(dst_archetype).0
+            };
+
+            // Do the clone_merge for this archetype
+            dst_storage
+                .archetypes_mut()
+                .get_mut(*dst_archetype_index)
+                .unwrap()
+                .clone_merge(
+                    &src_world,
+                    src_archetype,
+                    dst_archetype_index,
+                    &self.entity_allocator,
+                    &mut self.entity_locations,
+                    clone_impl,
+                    replace_mappings,
+                    &mut result_mappings,
+                );
         }
     }
 
@@ -888,6 +1037,36 @@ impl Default for World {
 pub enum EntityMutationError {
     #[error("entity does not exist")]
     DoesNotExist,
+}
+
+/// Describes how to handle a clone_merge. Allows the user to transform components from one type
+/// to another and provide their own implementation for cloning/transforming
+pub trait CloneMergeImpl {
+    /// When a component of the provided `component_type` is encountered, we will transfer data
+    /// from it into the returned component type. For a basic clone implementation, this function
+    /// should return the same type as was passed into it
+    fn map_component_type(
+        &self,
+        component_type: ComponentTypeId,
+    ) -> (ComponentTypeId, ComponentMeta);
+
+    /// When called, the implementation should copy the data from src_data to dst_data. The
+    /// src_world and src_entities are provided so that other components on the same Entity can
+    /// be looked up. The dst_resources are provided so that any required side effects to resources
+    /// (like registering a physics body into a physics engine) can be implemented.
+    #[allow(clippy::too_many_arguments)]
+    fn clone_components(
+        &self,
+        src_world: &World,
+        src_component_storage: &ComponentStorage,
+        src_component_storage_indexes: core::ops::Range<usize>,
+        src_type: ComponentTypeId,
+        src_entities: &[Entity],
+        dst_entities: &[Entity],
+        src_data: *const u8,
+        dst_data: *mut u8,
+        num_components: usize,
+    );
 }
 
 /// Describes the types of a set of components attached to an entity.
