@@ -882,7 +882,6 @@ impl ArchetypeData {
                                 dst_component_writer.reserve_raw(entities_to_write).as_ptr();
 
                             // Delegate the clone operation to the provided CloneImpl
-<<<<<<< HEAD:legion_core/src/storage.rs
                             clone_impl.clone_components(
                                 src_world,
                                 src_chunk,
@@ -892,17 +891,6 @@ impl ArchetypeData {
                                 &dst_entities[src_entity_start_idx..src_entity_end_idx],
                                 src_data,
                                 dst_data,
-=======
-                            clone_impl.clone(&dst_entities[src_entity_start_idx..src_entity_end_idx], *src_type, comp_src, comp_dst, entities_to_write);
-
-                            // Component storages are dense (swap-removes are used to keep them from becoming fragmented.) This means
-                            // the open slots in the chunk are at the end. We extended dst_entities all at once above so we can offset
-                            // it by entities_to_write
-                            let dst_entity_start_idx = dst_entities.len() - entities_to_write;
-
-                            println!(
-                                "cloned {} entities for type {:?} to type {:?} from chunk {} to chunk {}, starting at src idx {} and writing to dst idx {}",
->>>>>>> Add entity slice to CloneImpl::clone to let implementors know which entities map to which cloned components:src/storage.rs
                                 entities_to_write,
                             );
                         }

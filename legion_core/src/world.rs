@@ -1057,13 +1057,9 @@ pub trait CloneMergeImpl {
     #[allow(clippy::too_many_arguments)]
     fn clone_components(
         &self,
-<<<<<<< HEAD:legion_core/src/world.rs
         src_world: &World,
         src_component_storage: &ComponentStorage,
         src_component_storage_indexes: core::ops::Range<usize>,
-=======
-        entities: &[Entity],
->>>>>>> Add entity slice to CloneImpl::clone to let implementors know which entities map to which cloned components:src/world.rs
         src_type: ComponentTypeId,
         src_entities: &[Entity],
         dst_entities: &[Entity],
