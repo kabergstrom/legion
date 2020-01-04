@@ -886,6 +886,10 @@ impl ArchetypeData {
                                 src_world,
                                 src_chunk,
                                 src_entity_start_idx..src_entity_end_idx,
+<<<<<<< HEAD:legion_core/src/storage.rs
+=======
+                                dst_resources,
+>>>>>>> Add chunk and indexes to the CloneMergeImpl trait:src/storage.rs
                                 *src_type,
                                 &src_chunk.entities[src_entity_start_idx..src_entity_end_idx],
                                 &dst_entities[src_entity_start_idx..src_entity_end_idx],
