@@ -1060,10 +1060,6 @@ pub trait CloneMergeImpl {
         src_world: &World,
         src_component_storage: &ComponentStorage,
         src_component_storage_indexes: core::ops::Range<usize>,
-<<<<<<< HEAD:legion_core/src/world.rs
-=======
-        dst_resources: &Resources,
->>>>>>> Add chunk and indexes to the CloneMergeImpl trait:src/world.rs
         src_type: ComponentTypeId,
         src_entities: &[Entity],
         dst_entities: &[Entity],
