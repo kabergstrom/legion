@@ -757,7 +757,7 @@ impl World {
         let location = self
             .entity_allocator
             .get_location(entity.index());
-        let archetype = location.map(|location| self.storage().archetypes().get(location.archetype())).flatten();
+        let archetype = location.map(|location| self.storage().archetypes().get(location.archetype())).unwrap_or(None);
         archetype.map(|archetype| archetype.description().components())
     }
 
@@ -769,7 +769,7 @@ impl World {
         let location = self
             .entity_allocator
             .get_location(entity.index());
-        let archetype = location.map(|location| self.storage().archetypes().get(location.archetype())).flatten();
+        let archetype = location.map(|location| self.storage().archetypes().get(location.archetype())).unwrap_or(None);
         archetype.map(|archetype| archetype.description().tags())
         
     }
