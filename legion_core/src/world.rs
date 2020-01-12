@@ -2064,4 +2064,3 @@ mod tests {
         assert_eq!(*b.get_component::<Pos>(entity_a).unwrap(), Pos(1., 2., 3.));
     }
 }
-
