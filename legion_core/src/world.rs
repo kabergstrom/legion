@@ -945,7 +945,7 @@ impl World {
             // data will be available later to replace the data we're about to delete
             for k in replace_mappings.keys() {
                 if !src_world.entity_allocator.is_alive(*k) {
-                    panic!("clone_merge assumes all replace_mapping keys exist in the source world");
+                    panic!("clone_from assumes all replace_mapping keys exist in the source world");
                 }
             }
 
@@ -960,7 +960,7 @@ impl World {
                         .expect("Failed to get location of live entity");
                     self.delete_location(location);
                 } else {
-                    panic!("clone_merge assumes all replace_mapping values exist in the destination world");
+                    panic!("clone_from assumes all replace_mapping values exist in the destination world");
                 }
             }
         }
@@ -993,7 +993,7 @@ impl World {
                 dst_storage.alloc_archetype(dst_archetype).0
             };
 
-            // Do the clone_merge for this archetype
+            // Do the clone_from for this archetype
             dst_storage
                 .archetypes_mut()
                 .get_mut(dst_archetype_index)
@@ -1038,7 +1038,7 @@ impl World {
                     .expect("Failed to get location of live entity");
                 self.delete_location(location);
             } else {
-                panic!("clone_merge_single assumes entity_mapping exists in the destination world");
+                panic!("clone_from_single assumes entity_mapping exists in the destination world");
             }
         }
 
@@ -1075,7 +1075,7 @@ impl World {
             dst_storage.alloc_archetype(dst_archetype).0
         };
 
-        // Do the clone_merge for this archetype
+        // Do the clone_from for this archetype
         dst_storage
             .archetypes_mut()
             .get_mut(dst_archetype_index)
@@ -1185,7 +1185,7 @@ impl Default for World {
     fn default() -> Self { Self::new() }
 }
 
-/// Describes how to handle a clone_merge. Allows the user to transform components from one type
+/// Describes how to handle a clone_from. Allows the user to transform components from one type
 /// to another and provide their own implementation for cloning/transforming
 pub trait CloneImpl {
     /// When a component of the provided `component_type` is encountered, we will transfer data
@@ -1193,7 +1193,7 @@ pub trait CloneImpl {
     /// should return the same type as was passed into it
     fn map_component_type(
         &self,
-        component_type: ComponentTypeId,
+        component_type_id: ComponentTypeId,
     ) -> (ComponentTypeId, ComponentMeta);
 
     /// When called, the implementation should copy the data from src_data to dst_data. The
