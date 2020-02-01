@@ -231,7 +231,7 @@ impl EntityAllocator {
 
 impl Drop for EntityAllocator {
     fn drop(&mut self) {
-        for mut block in self.blocks.drain(..) {
+        for mut block in self.blocks.write().drain(..) {
             // If any entity in the block is in an allocated state, clear and repopulate the free
             // list, forcing all entities into an unallocated state, but without loosing version
             // info
