@@ -981,6 +981,31 @@ impl ArchetypeData {
         dst_entity
     }
 
+    /// Iterate all entities in existence by iterating across archetypes, chunk sets, and chunks
+    pub(crate) fn iter_entities<'a>(
+        &'a self,
+    ) -> impl Iterator<Item = Entity> + 'a {
+        self.chunk_sets
+            .iter()
+            .enumerate()
+            .flat_map(move |(_set_index, set)| {
+                set.chunks
+                    .iter()
+                    .enumerate()
+                    .flat_map(move |(_chunk_index, chunk)| {
+                        chunk
+                            .entities()
+                            .iter()
+                            .enumerate()
+                            .map(move |(_entity_index, entity)| {
+                                *entity
+                            })
+                    })
+            })
+    }
+
+    /// Iterate all entities in existence by iterating across archetypes, chunk sets, and chunks
+    /// Returns the EntityLocation as well as the Entity
     pub(crate) fn enumerate_entities<'a>(
         &'a self,
         archetype_index: usize,
