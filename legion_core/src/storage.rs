@@ -867,7 +867,7 @@ impl ArchetypeData {
         dst_archetype_index: usize,
         dst_entity_allocator: &crate::entity::EntityAllocator,
         clone_impl: &C,
-        replace_mapping: Option<Entity>
+        replace_mapping: Option<Entity>,
     ) -> Entity {
         // Iterate all the chunk sets within the source archetype
         let src_tags = &src_archetype.tags;
@@ -989,21 +989,12 @@ impl ArchetypeData {
     }
 
     /// Iterate all entities in existence by iterating across archetypes, chunk sets, and chunks
-    pub(crate) fn iter_entities<'a>(
-        &'a self,
-    ) -> impl Iterator<Item = Entity> + 'a {
-        self.chunk_sets
-            .iter()
-            .flat_map(move |set| {
-                set.chunks
-                    .iter()
-                    .flat_map(move |chunk| {
-                        chunk
-                            .entities()
-                            .iter()
-                            .map(|e| *e)
-                    })
-            })
+    pub(crate) fn iter_entities<'a>(&'a self) -> impl Iterator<Item = Entity> + 'a {
+        self.chunk_sets.iter().flat_map(move |set| {
+            set.chunks
+                .iter()
+                .flat_map(move |chunk| chunk.entities().iter().map(|e| *e))
+        })
     }
 
     /// Iterate all entities in existence by iterating across archetypes, chunk sets, and chunks
@@ -1691,10 +1682,8 @@ impl Drop for ComponentStorage {
                 }
             }
 
-
             for e in &self.entities {
-                self.subscribers
-                    .send(Event::EntityRemoved(*e, self.id()));
+                self.subscribers.send(Event::EntityRemoved(*e, self.id()));
             }
 
             self.update_count_gauge();

@@ -784,9 +784,10 @@ impl World {
     /// entity allocators because the data structures contains a list of free entities instead
     /// of allocated entities
     pub fn iter_entities<'a>(&'a self) -> impl Iterator<Item = Entity> + 'a {
-        self.storage().archetypes().iter().flat_map(|archetype_data|
-            archetype_data.iter_entities().map(|entity| entity)
-        )
+        self.storage()
+            .archetypes()
+            .iter()
+            .flat_map(|archetype_data| archetype_data.iter_entities().map(|entity| entity))
     }
 
     pub fn delete_all(&mut self) {
@@ -1032,7 +1033,7 @@ impl World {
         src_world: &World,
         src_entity: Entity,
         clone_impl: &C,
-        replace_mapping: Option<Entity>
+        replace_mapping: Option<Entity>,
     ) -> Entity {
         let span = span!(Level::INFO, "CloneMergingSingle worlds", source = src_world.id().0, destination = ?self.id());
         let _guard = span.enter();

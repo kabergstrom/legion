@@ -246,9 +246,7 @@ impl EntityAllocator {
 }
 
 impl Drop for EntityAllocator {
-    fn drop(&mut self) {
-        self.delete_all_entities();
-    }
+    fn drop(&mut self) { self.delete_all_entities(); }
 }
 
 pub struct CreateEntityIter<'a> {
