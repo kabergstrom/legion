@@ -789,6 +789,14 @@ impl World {
         )
     }
 
+    pub fn delete_all(&mut self) {
+        for archetype in self.storage_mut().archetypes_mut() {
+            archetype.delete_all();
+        }
+
+        self.entity_allocator.delete_all_entities();
+    }
+
     /// Mutably borrows entity data for the given entity.
     ///
     /// Returns `Some(data)` if the entity was found and contains the specified data.

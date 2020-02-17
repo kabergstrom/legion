@@ -205,6 +205,22 @@ impl EntityAllocator {
         self.blocks.write().iter_mut().find_map(|b| b.free(entity))
     }
 
+    pub(crate) fn delete_all_entities(&self) {
+        for mut block in self.blocks.write().drain(..) {
+            // If any entity in the block is in an allocated state, clear and repopulate the free
+            // list, forcing all entities into an unallocated state, but without loosing version
+            // info
+            if block.free.len() < block.versions.len() {
+                block.free.clear();
+                for i in 0..block.versions.len() {
+                    block.free.push(i as u32 + block.start);
+                }
+            }
+
+            self.allocator.lock().free(block);
+        }
+    }
+
     pub(crate) fn set_location(&self, entity: EntityIndex, location: EntityLocation) {
         self.blocks
             .write()
@@ -231,19 +247,7 @@ impl EntityAllocator {
 
 impl Drop for EntityAllocator {
     fn drop(&mut self) {
-        for mut block in self.blocks.write().drain(..) {
-            // If any entity in the block is in an allocated state, clear and repopulate the free
-            // list, forcing all entities into an unallocated state, but without loosing version
-            // info
-            if block.free.len() < block.versions.len() {
-                block.free.clear();
-                for i in 0..block.versions.len() {
-                    block.free.push(i as u32 + block.start);
-                }
-            }
-
-            self.allocator.lock().free(block);
-        }
+        self.delete_all_entities();
     }
 }
 

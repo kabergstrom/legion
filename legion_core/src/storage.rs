@@ -617,6 +617,13 @@ impl ArchetypeData {
         }
     }
 
+    pub(crate) fn delete_all(&mut self) {
+        for set in &mut self.chunk_sets {
+            // Clearing the chunk
+            set.chunks.clear();
+        }
+    }
+
     pub(crate) fn subscribe(&mut self, subscriber: Subscriber) {
         self.subscribers.push(subscriber.clone());
 
@@ -1683,6 +1690,14 @@ impl Drop for ComponentStorage {
                     }
                 }
             }
+
+
+            for e in &self.entities {
+                self.subscribers
+                    .send(Event::EntityRemoved(*e, self.id()));
+            }
+
+            self.update_count_gauge();
 
             // free the chunk's memory
             unsafe {
