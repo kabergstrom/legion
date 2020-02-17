@@ -987,19 +987,14 @@ impl ArchetypeData {
     ) -> impl Iterator<Item = Entity> + 'a {
         self.chunk_sets
             .iter()
-            .enumerate()
-            .flat_map(move |(_set_index, set)| {
+            .flat_map(move |set| {
                 set.chunks
                     .iter()
-                    .enumerate()
-                    .flat_map(move |(_chunk_index, chunk)| {
+                    .flat_map(move |chunk| {
                         chunk
                             .entities()
                             .iter()
-                            .enumerate()
-                            .map(move |(_entity_index, entity)| {
-                                *entity
-                            })
+                            .map(|e| *e)
                     })
             })
     }
