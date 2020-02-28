@@ -2,8 +2,8 @@
 
 [![Build Status][build_img]][build_lnk] [![Crates.io][crates_img]][crates_lnk] [![Docs.rs][doc_img]][doc_lnk]
 
-[build_img]: https://img.shields.io/travis/TomGillen/legion/master.svg
-[build_lnk]: https://travis-ci.org/TomGillen/legion
+[build_img]: https://github.com/TomGillen/legion/workflows/CI/badge.svg
+[build_lnk]: https://github.com/TomGillen/legion/actions
 [crates_img]: https://img.shields.io/crates/v/legion.svg
 [crates_lnk]: https://crates.io/crates/legion
 [doc_img]: https://docs.rs/legion/badge.svg
@@ -20,7 +20,7 @@ Based on the [ecs_bench](https://github.com/lschmierer/ecs_bench) project.
 ## Getting Started
 
 ```rust
-use legion::*;
+use legion::prelude::*;
 
 // Define our entity data types
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -9,6 +9,10 @@ use crate::filter::ChunkFilterData;
 use crate::filter::ChunksetFilterData;
 use crate::filter::EntityFilter;
 use crate::filter::Filter;
+use crate::index::ArchetypeIndex;
+use crate::index::ChunkIndex;
+use crate::index::ComponentIndex;
+use crate::index::SetIndex;
 use crate::iterator::FissileZip;
 use crate::iterator::SliceVecIter;
 use crate::world::TagSet;
@@ -206,25 +210,26 @@ impl Storage {
     pub(crate) fn alloc_archetype(
         &mut self,
         desc: ArchetypeDescription,
-    ) -> (usize, &mut ArchetypeData) {
-        let id = ArchetypeId(self.world_id, self.archetypes.len());
+    ) -> (ArchetypeIndex, &mut ArchetypeData) {
+        let index = ArchetypeIndex(self.archetypes.len());
+        let id = ArchetypeId(self.world_id, index);
         let archetype = ArchetypeData::new(id, desc);
 
         self.push(archetype);
 
         let index = self.archetypes.len() - 1;
         let archetype = &mut self.archetypes[index];
-        (index, archetype)
+        (ArchetypeIndex(index), archetype)
     }
 
     pub(crate) fn push(&mut self, mut archetype: ArchetypeData) {
         let desc = archetype.description();
         self.component_types
             .0
-            .push(desc.components.iter().map(|(t, _)| *t));
-        self.tag_types.0.push(desc.tags.iter().map(|(t, _)| *t));
+            .push(desc.components.iter().map(|&(t, _)| t));
+        self.tag_types.0.push(desc.tags.iter().map(|&(t, _)| t));
 
-        let index = self.archetypes.len();
+        let index = ArchetypeIndex(self.archetypes.len());
         let archetype_data = ArchetypeFilterData {
             component_types: &self.component_types,
             tag_types: &self.tag_types,
@@ -234,7 +239,7 @@ impl Storage {
 
         trace!(
             world = id.world().index(),
-            archetype = id.index(),
+            archetype = *id.index(),
             components = ?desc.component_names,
             tags = ?desc.tag_names,
             "Created Archetype"
@@ -269,6 +274,46 @@ impl Storage {
     ) -> std::vec::Drain<ArchetypeData> {
         self.archetypes.drain(range)
     }
+
+    pub(crate) fn archetype(
+        &self,
+        ArchetypeIndex(index): ArchetypeIndex,
+    ) -> Option<&ArchetypeData> {
+        self.archetypes().get(index)
+    }
+
+    pub(crate) fn archetype_mut(
+        &mut self,
+        ArchetypeIndex(index): ArchetypeIndex,
+    ) -> Option<&mut ArchetypeData> {
+        self.archetypes_mut().get_mut(index)
+    }
+
+    pub(crate) unsafe fn archetype_unchecked(
+        &self,
+        ArchetypeIndex(index): ArchetypeIndex,
+    ) -> &ArchetypeData {
+        self.archetypes().get_unchecked(index)
+    }
+
+    pub(crate) unsafe fn archetype_unchecked_mut(
+        &mut self,
+        ArchetypeIndex(index): ArchetypeIndex,
+    ) -> &mut ArchetypeData {
+        self.archetypes_mut().get_unchecked_mut(index)
+    }
+
+    pub(crate) fn chunk(&self, loc: EntityLocation) -> Option<&ComponentStorage> {
+        self.archetype(loc.archetype())
+            .and_then(|atd| atd.chunkset(loc.set()))
+            .and_then(|cs| cs.chunk(loc.chunk()))
+    }
+
+    pub(crate) fn chunk_mut(&mut self, loc: EntityLocation) -> Option<&mut ComponentStorage> {
+        self.archetype_mut(loc.archetype())
+            .and_then(|atd| atd.chunkset_mut(loc.set()))
+            .and_then(|cs| cs.chunk_mut(loc.chunk()))
+    }
 }
 
 /// Stores metadata decribing the type of a tag.
@@ -287,7 +332,11 @@ impl TagMeta {
         TagMeta {
             size: size_of::<T>(),
             align: std::mem::align_of::<T>(),
-            drop_fn: Some(|ptr| unsafe { std::ptr::drop_in_place(ptr as *mut T) }),
+            drop_fn: if std::mem::needs_drop::<T>() {
+                Some(|ptr| unsafe { std::ptr::drop_in_place(ptr as *mut T) })
+            } else {
+                None
+            },
             eq_fn: |a, b| unsafe { *(a as *const T) == *(b as *const T) },
             clone_fn: |src, dst| unsafe {
                 let clone = (&*(src as *const T)).clone();
@@ -327,7 +376,11 @@ impl ComponentMeta {
         ComponentMeta {
             size: size_of::<T>(),
             align: std::mem::align_of::<T>(),
-            drop_fn: Some(|ptr| unsafe { std::ptr::drop_in_place(ptr as *mut T) }),
+            drop_fn: if std::mem::needs_drop::<T>() {
+                Some(|ptr| unsafe { std::ptr::drop_in_place(ptr as *mut T) })
+            } else {
+                None
+            },
         }
     }
 
@@ -396,17 +449,19 @@ impl<'a> Filter<ArchetypeFilterData<'a>> for ArchetypeDescription {
     }
 }
 
-const MAX_CHUNK_SIZE: usize = 16 * 1024;
+const MAX_CHUNK_SIZE: usize = 16 * 1024 * 10;
 const COMPONENT_STORAGE_ALIGNMENT: usize = 64;
 
 /// Unique ID of an archetype.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub struct ArchetypeId(WorldId, usize);
+pub struct ArchetypeId(WorldId, ArchetypeIndex);
 
 impl ArchetypeId {
-    pub(crate) fn new(world_id: WorldId, index: usize) -> Self { ArchetypeId(world_id, index) }
+    pub(crate) fn new(world_id: WorldId, index: ArchetypeIndex) -> Self {
+        ArchetypeId(world_id, index)
+    }
 
-    fn index(self) -> usize { self.1 }
+    fn index(self) -> ArchetypeIndex { self.1 }
 
     fn world(self) -> WorldId { self.0 }
 }
@@ -416,7 +471,7 @@ pub struct Tags(pub(crate) SmallVec<[(TagTypeId, TagStorage); 3]>);
 
 impl Tags {
     fn new(mut data: SmallVec<[(TagTypeId, TagStorage); 3]>) -> Self {
-        data.sort_by_key(|(t, _)| *t);
+        data.sort_by_key(|&(t, _)| t);
         Self(data)
     }
 
@@ -430,7 +485,7 @@ impl Tags {
     #[inline]
     pub fn get(&self, type_id: TagTypeId) -> Option<&TagStorage> {
         self.0
-            .binary_search_by_key(&type_id, |(t, _)| *t)
+            .binary_search_by_key(&type_id, |&(t, _)| t)
             .ok()
             .map(|i| unsafe { &self.0.get_unchecked(i).1 })
     }
@@ -439,19 +494,23 @@ impl Tags {
     #[inline]
     pub fn get_mut(&mut self, type_id: TagTypeId) -> Option<&mut TagStorage> {
         self.0
-            .binary_search_by_key(&type_id, |(t, _)| *t)
+            .binary_search_by_key(&type_id, |&(t, _)| t)
             .ok()
             .map(move |i| unsafe { &mut self.0.get_unchecked_mut(i).1 })
     }
 
-    pub(crate) fn tag_set(&self, chunk: usize) -> DynamicTagSet {
+    pub(crate) fn tag_set(&self, SetIndex(index): SetIndex) -> DynamicTagSet {
         let mut tags = DynamicTagSet { tags: Vec::new() };
 
         unsafe {
-            for (type_id, storage) in self.0.iter() {
-                let (ptr, _, count) = storage.data_raw();
-                debug_assert!(chunk < count, "chunk index out of bounds");
-                tags.push(*type_id, *storage.element(), ptr);
+            for &(type_id, ref storage) in self.0.iter() {
+                let (ptr, element_size, count) = storage.data_raw();
+                debug_assert!(index < count, "set index out of bounds");
+                tags.push(
+                    type_id,
+                    *storage.element(),
+                    NonNull::new(ptr.as_ptr().add(element_size * index)).unwrap(),
+                );
             }
         }
 
@@ -488,7 +547,7 @@ impl DynamicTagSet {
             .tags
             .iter()
             .enumerate()
-            .find(|(_, (t, _, _))| *t == type_id)
+            .find(|(_, &(t, _, _))| t == type_id)
         {
             let (_, meta, ptr) = self.tags.remove(i);
             unsafe {
@@ -507,8 +566,8 @@ impl DynamicTagSet {
 
 impl TagSet for DynamicTagSet {
     fn write_tags(&self, tags: &mut Tags) {
-        for (type_id, meta, ptr) in self.tags.iter() {
-            let storage = tags.get_mut(*type_id).unwrap();
+        for &(type_id, ref meta, ptr) in self.tags.iter() {
+            let storage = tags.get_mut(type_id).unwrap();
             unsafe {
                 if meta.drop_fn.is_some() && !meta.is_zero_sized() {
                     // clone the value into temp storage then move it into the chunk
@@ -563,7 +622,7 @@ impl ArchetypeData {
         let tags = desc
             .tags
             .iter()
-            .map(|(type_id, meta)| (*type_id, TagStorage::new(*meta)))
+            .map(|&(type_id, meta)| (type_id, TagStorage::new(meta)))
             .collect();
 
         // create component data layout
@@ -579,12 +638,12 @@ impl ArchetypeData {
         );
         let mut data_capacity = 0usize;
         let mut component_data_offsets = Vec::new();
-        for (type_id, meta) in desc.components.iter() {
+        for &(type_id, meta) in desc.components.iter() {
             data_capacity = align_up(
                 align_up(data_capacity, COMPONENT_STORAGE_ALIGNMENT),
                 meta.align,
             );
-            component_data_offsets.push((*type_id, data_capacity, *meta));
+            component_data_offsets.push((type_id, data_capacity, meta));
             data_capacity += meta.size * entity_capacity;
         }
         let data_alignment =
@@ -608,7 +667,7 @@ impl ArchetypeData {
     pub(crate) fn subscribe(&mut self, subscriber: Subscriber) {
         self.subscribers.push(subscriber.clone());
 
-        for i in 0..self.chunk_sets.len() {
+        for i in (0..self.chunk_sets.len()).map(SetIndex) {
             let filter = ChunksetFilterData {
                 archetype_data: self,
             };
@@ -622,7 +681,7 @@ impl ArchetypeData {
     pub(crate) fn set_subscribers(&mut self, subscribers: Subscribers) {
         self.subscribers = subscribers;
 
-        for i in 0..self.chunk_sets.len() {
+        for i in (0..self.chunk_sets.len()).map(SetIndex) {
             let filter = ChunksetFilterData {
                 archetype_data: self,
             };
@@ -635,7 +694,7 @@ impl ArchetypeData {
     /// Gets the unique ID of this archetype.
     pub fn id(&self) -> ArchetypeId { self.id }
 
-    fn find_chunk_set_by_tags(&self, other_tags: &Tags, other_set_index: usize) -> Option<usize> {
+    fn find_chunk_set_by_tags(&self, other_tags: &Tags, other_set_index: usize) -> Option<SetIndex> {
         // search for a matching chunk set
         let mut set_match = None;
         for self_set_index in 0..self.chunk_sets.len() {
@@ -656,7 +715,7 @@ impl ArchetypeData {
             }
 
             if matches {
-                set_match = Some(self_set_index);
+                set_match = Some(SetIndex(self_set_index));
                 break;
             }
         }
@@ -677,11 +736,12 @@ impl ArchetypeData {
                 }
             } else {
                 // if we did not find a match, clone the tags and move the set
+                set.mark_modified();
                 self.push(set, |self_tags| {
-                    for (type_id, other_tags) in other_tags.0.iter() {
+                    for &(type_id, ref other_tags) in other_tags.0.iter() {
                         unsafe {
                             let (src, _, _) = other_tags.data_raw();
-                            let dst = self_tags.get_mut(*type_id).unwrap().alloc_ptr();
+                            let dst = self_tags.get_mut(type_id).unwrap().alloc_ptr();
                             other_tags.element().clone(src.as_ptr(), dst);
                         }
                     }
@@ -697,9 +757,9 @@ impl ArchetypeData {
         &mut self,
         src_world: &crate::world::World,
         src_archetype: &ArchetypeData,
-        dst_archetype_index: usize,
-        dst_entity_allocator: &mut crate::entity::EntityAllocator,
-        dst_resources: &crate::resource::Resources,
+        dst_archetype_index: ArchetypeIndex,
+        dst_entity_allocator: &crate::entity::EntityAllocator,
+        dst_entity_locations: &mut crate::entity::Locations,
         clone_impl: &C,
         replace_mappings: Option<&std::collections::HashMap<Entity, Entity>>,
         result_mappings: &mut Option<&mut std::collections::HashMap<Entity, Entity>>,
@@ -766,7 +826,7 @@ impl ArchetypeData {
                             dst_archetype_index,
                             dst_chunk_set_index,
                             dst_free_chunk_index,
-                            dst_entities.len(),
+                            ComponentIndex( dst_entities.len()),
                         );
 
                         // Determine if there is an entity we will be replacing
@@ -784,7 +844,7 @@ impl ArchetypeData {
                             dst_entity_allocator.create_entity()
                         };
 
-                        dst_entity_allocator.set_location(dst_entity.index(), location);
+                        dst_entity_locations.set(dst_entity, location);
                         dst_entities.push(dst_entity);
 
                         if let Some(result_mappings) = result_mappings {
@@ -807,8 +867,9 @@ impl ArchetypeData {
                         let src_component_storage = src_chunk
                             .components(*src_type)
                             .expect("ComponentResourceSet missing in clone_merge");
-                        let (src_component_chunk_data, src_element_size, _) =
-                            src_component_storage.data_raw();
+
+
+                        let (src_component_chunk_data, src_element_size, _) = unsafe { src_component_storage.data_raw() };
 
                         // Now copy the data
                         unsafe {
@@ -825,7 +886,6 @@ impl ArchetypeData {
                                 src_world,
                                 src_chunk,
                                 src_entity_start_idx..src_entity_end_idx,
-                                dst_resources,
                                 *src_type,
                                 &src_chunk.entities[src_entity_start_idx..src_entity_end_idx],
                                 &dst_entities[src_entity_start_idx..src_entity_end_idx],
@@ -843,7 +903,7 @@ impl ArchetypeData {
 
     pub(crate) fn enumerate_entities<'a>(
         &'a self,
-        archetype_index: usize,
+        archetype_index: ArchetypeIndex,
     ) -> impl Iterator<Item = (Entity, EntityLocation)> + 'a {
         self.chunk_sets
             .iter()
@@ -857,14 +917,14 @@ impl ArchetypeData {
                             .entities()
                             .iter()
                             .enumerate()
-                            .map(move |(entity_index, entity)| {
+                            .map(move |(entity_index, &entity)| {
                                 (
-                                    *entity,
+                                    entity,
                                     EntityLocation::new(
                                         archetype_index,
-                                        set_index,
-                                        chunk_index,
-                                        entity_index,
+                                        SetIndex(set_index),
+                                        ChunkIndex(chunk_index),
+                                        ComponentIndex(entity_index),
                                     ),
                                 )
                             })
@@ -876,7 +936,7 @@ impl ArchetypeData {
         initialize(&mut self.tags);
         self.chunk_sets.push(set);
 
-        let index = self.chunk_sets.len() - 1;
+        let index = SetIndex(self.chunk_sets.len() - 1);
         let filter = ChunksetFilterData {
             archetype_data: self,
         };
@@ -889,35 +949,39 @@ impl ArchetypeData {
     /// Allocates a new chunk set. Returns the index of the new set.
     ///
     /// `initialize` is expected to push the new chunkset's tag values onto the tags collection.
-    pub(crate) fn alloc_chunk_set<F: FnMut(&mut Tags)>(&mut self, initialize: F) -> usize {
+    pub(crate) fn alloc_chunk_set<F: FnMut(&mut Tags)>(&mut self, initialize: F) -> SetIndex {
         self.push(Chunkset::default(), initialize);
-        self.chunk_sets.len() - 1
+        SetIndex(self.chunk_sets.len() - 1)
     }
 
     /// Finds a chunk with space free for at least `minimum_space` entities, creating a chunk if needed.
-    pub(crate) fn get_free_chunk(&mut self, set_index: usize, minimum_space: usize) -> usize {
+    pub(crate) fn get_free_chunk(
+        &mut self,
+        set_index: SetIndex,
+        minimum_space: usize,
+    ) -> ChunkIndex {
         let count = {
             let chunks = &mut self.chunk_sets[set_index];
             let len = chunks.len();
             for (i, chunk) in chunks.iter_mut().enumerate() {
                 let space_left = chunk.capacity() - chunk.len();
                 if space_left >= minimum_space {
-                    return i;
+                    return ChunkIndex(i);
                 }
             }
-            len
+            ChunkIndex(len)
         };
 
         let chunk = self
             .component_layout
             .alloc_storage(ChunkId(self.id, set_index, count));
-        unsafe { self.chunk_sets.get_unchecked_mut(set_index).push(chunk) };
+        unsafe { self.chunkset_unchecked_mut(set_index).push(chunk) };
 
         trace!(
             world = self.id.world().index(),
-            archetype = self.id.index(),
-            chunkset = set_index,
-            chunk = count,
+            archetype = *self.id.index(),
+            chunkset = *set_index,
+            chunk = *count,
             components = ?self.desc.component_names,
             tags = ?self.desc.tag_names,
             "Created chunk"
@@ -954,13 +1018,16 @@ impl ArchetypeData {
     ) -> bool {
         trace!(
             world = self.id().world().index(),
-            archetype = self.id().index(),
+            archetype = *self.id().index(),
             "Defragmenting archetype"
         );
         let arch_index = self.id.index();
         for (i, chunkset) in self.chunk_sets.iter_mut().enumerate() {
             let complete = chunkset.defrag(budget, |e, chunk, component| {
-                on_moved(e, EntityLocation::new(arch_index, i, chunk, component));
+                on_moved(
+                    e,
+                    EntityLocation::new(arch_index, SetIndex(i), chunk, component),
+                );
             });
             if !complete {
                 return false;
@@ -968,6 +1035,25 @@ impl ArchetypeData {
         }
 
         true
+    }
+
+    pub(crate) fn chunkset(&self, SetIndex(index): SetIndex) -> Option<&Chunkset> {
+        self.chunksets().get(index)
+    }
+
+    pub(crate) fn chunkset_mut(&mut self, SetIndex(index): SetIndex) -> Option<&mut Chunkset> {
+        self.chunksets_mut().get_mut(index)
+    }
+
+    pub(crate) unsafe fn chunkset_unchecked(&self, SetIndex(index): SetIndex) -> &Chunkset {
+        self.chunksets().get_unchecked(index)
+    }
+
+    pub(crate) unsafe fn chunkset_unchecked_mut(
+        &mut self,
+        SetIndex(index): SetIndex,
+    ) -> &mut Chunkset {
+        self.chunksets_mut().get_unchecked_mut(index)
     }
 }
 
@@ -991,9 +1077,9 @@ impl ComponentStorageLayout {
         let storage_info = self
             .data_layout
             .iter()
-            .map(|(ty, _, meta)| {
+            .map(|&(ty, _, ref meta)| {
                 (
-                    *ty,
+                    ty,
                     ComponentResourceSet {
                         ptr: AtomicRefCell::new(meta.align as *mut u8),
                         capacity: self.capacity,
@@ -1013,7 +1099,7 @@ impl ComponentStorageLayout {
             component_offsets: self
                 .data_layout
                 .iter()
-                .map(|(ty, offset, _)| (*ty, *offset))
+                .map(|&(ty, offset, _)| (ty, offset))
                 .collect(),
             component_layout: self.alloc_layout,
             component_info: UnsafeCell::new(Components::new(storage_info)),
@@ -1053,7 +1139,7 @@ impl Chunkset {
         let id = chunk.id();
         self.chunks.push(chunk);
 
-        let index = self.chunks.len() - 1;
+        let index = ChunkIndex(self.chunks.len() - 1);
         let filter = ChunkFilterData {
             chunks: &self.chunks,
         };
@@ -1065,7 +1151,7 @@ impl Chunkset {
     pub(crate) fn subscribe(&mut self, subscriber: Subscriber) {
         self.subscribers.push(subscriber.clone());
 
-        for i in 0..self.chunks.len() {
+        for i in (0..self.chunks.len()).map(ChunkIndex) {
             let filter = ChunkFilterData {
                 chunks: &self.chunks,
             };
@@ -1079,13 +1165,19 @@ impl Chunkset {
     pub(crate) fn set_subscribers(&mut self, subscribers: Subscribers) {
         self.subscribers = subscribers;
 
-        for i in 0..self.chunks.len() {
+        for i in (0..self.chunks.len()).map(ChunkIndex) {
             let filter = ChunkFilterData {
                 chunks: &self.chunks,
             };
 
             let subscribers = self.subscribers.matches_chunk(filter, i);
             self.chunks[i].set_subscribers(subscribers);
+        }
+    }
+
+    fn mark_modified(&mut self) {
+        for chunk in self.chunks.iter_mut() {
+            chunk.mark_modified();
         }
     }
 
@@ -1134,7 +1226,7 @@ impl Chunkset {
     /// new component index.
     ///
     /// Returns whether or not the chunkset has been fully defragmented.
-    fn defrag<F: FnMut(Entity, usize, usize)>(
+    fn defrag<F: FnMut(Entity, ChunkIndex, ComponentIndex)>(
         &mut self,
         budget: &mut usize,
         mut on_moved: F,
@@ -1180,11 +1272,16 @@ impl Chunkset {
                 *budget -= 1;
 
                 // move the last entity
-                let swapped = source.move_entity(target, source.len() - 1);
+                let comp_index = ComponentIndex(source.len() - 1);
+                let swapped = source.move_entity(target, comp_index);
                 assert!(swapped.is_none());
 
                 // notify move
-                on_moved(*target.entities.last().unwrap(), first, target.len() - 1);
+                on_moved(
+                    *target.entities.last().unwrap(),
+                    ChunkIndex(first),
+                    comp_index,
+                );
 
                 // exit if we cant move any more
                 if target.is_full() || source.is_empty() {
@@ -1193,22 +1290,47 @@ impl Chunkset {
             }
         }
     }
+
+    pub(crate) fn chunk(&self, ChunkIndex(index): ChunkIndex) -> Option<&ComponentStorage> {
+        self.chunks.get(index)
+    }
+
+    pub(crate) fn chunk_mut(
+        &mut self,
+        ChunkIndex(index): ChunkIndex,
+    ) -> Option<&mut ComponentStorage> {
+        self.chunks.get_mut(index)
+    }
+
+    pub(crate) unsafe fn chunk_unchecked(
+        &self,
+        ChunkIndex(index): ChunkIndex,
+    ) -> &ComponentStorage {
+        self.chunks.get_unchecked(index)
+    }
+
+    pub(crate) unsafe fn chunk_unchecked_mut(
+        &mut self,
+        ChunkIndex(index): ChunkIndex,
+    ) -> &mut ComponentStorage {
+        self.chunks.get_unchecked_mut(index)
+    }
 }
 
 /// Unique ID of a chunk.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub struct ChunkId(ArchetypeId, usize, usize);
+pub struct ChunkId(ArchetypeId, SetIndex, ChunkIndex);
 
 impl ChunkId {
-    pub(crate) fn new(archetype: ArchetypeId, set: usize, index: usize) -> Self {
+    pub(crate) fn new(archetype: ArchetypeId, set: SetIndex, index: ChunkIndex) -> Self {
         ChunkId(archetype, set, index)
     }
 
     pub fn archetype_id(&self) -> ArchetypeId { self.0 }
 
-    pub(crate) fn set(&self) -> usize { self.1 }
+    pub(crate) fn set(&self) -> SetIndex { self.1 }
 
-    pub(crate) fn index(&self) -> usize { self.2 }
+    pub(crate) fn index(&self) -> ChunkIndex { self.2 }
 }
 
 /// A set of component slices located on a chunk.
@@ -1216,7 +1338,7 @@ pub struct Components(SmallVec<[(ComponentTypeId, ComponentResourceSet); 5]>);
 
 impl Components {
     pub(crate) fn new(mut data: SmallVec<[(ComponentTypeId, ComponentResourceSet); 5]>) -> Self {
-        data.sort_by_key(|(t, _)| *t);
+        data.sort_by_key(|&(t, _)| t);
         Self(data)
     }
 
@@ -1224,7 +1346,7 @@ impl Components {
     #[inline]
     pub fn get(&self, type_id: ComponentTypeId) -> Option<&ComponentResourceSet> {
         self.0
-            .binary_search_by_key(&type_id, |(t, _)| *t)
+            .binary_search_by_key(&type_id, |&(t, _)| t)
             .ok()
             .map(|i| unsafe { &self.0.get_unchecked(i).1 })
     }
@@ -1233,7 +1355,7 @@ impl Components {
     #[inline]
     pub fn get_mut(&mut self, type_id: ComponentTypeId) -> Option<&mut ComponentResourceSet> {
         self.0
-            .binary_search_by_key(&type_id, |(t, _)| *t)
+            .binary_search_by_key(&type_id, |&(t, _)| t)
             .ok()
             .map(move |i| unsafe { &mut self.0.get_unchecked_mut(i).1 })
     }
@@ -1271,10 +1393,10 @@ impl<'a> StorageWriter<'a> {
 impl<'a> Drop for StorageWriter<'a> {
     fn drop(&mut self) {
         self.storage.update_count_gauge();
-        for entity in self.storage.entities.iter().skip(self.initial_count) {
+        for &entity in self.storage.entities.iter().skip(self.initial_count) {
             self.storage
                 .subscribers
-                .send(Event::EntityInserted(*entity, self.storage.id()));
+                .send(Event::EntityInserted(entity, self.storage.id()));
         }
     }
 }
@@ -1314,10 +1436,25 @@ impl ComponentStorage {
         unsafe { &*self.component_info.get() }.get(component_type)
     }
 
+    /// Increments all component versions, forcing the chunk to be seen as modified for all queries.
+    fn mark_modified(&mut self) {
+        unsafe {
+            let components = &mut *self.component_info.get();
+            for (_, component) in components.iter_mut() {
+                // touch each slice mutably to increment its version
+                let _ = component.data_raw_mut();
+            }
+        }
+    }
+
     /// Removes an entity from the chunk by swapping it with the last entry.
     ///
     /// Returns the ID of the entity which was swapped into the removed entity's position.
-    pub fn swap_remove(&mut self, index: usize, drop: bool) -> Option<Entity> {
+    pub fn swap_remove(
+        &mut self,
+        ComponentIndex(index): ComponentIndex,
+        drop: bool,
+    ) -> Option<Entity> {
         let removed = self.entities.swap_remove(index);
         for (_, component) in unsafe { &mut *self.component_info.get() }.iter_mut() {
             component.writer().swap_remove(index, drop);
@@ -1342,16 +1479,20 @@ impl ComponentStorage {
     /// the target chunk. Any components left over will be dropped.
     ///
     /// Returns the ID of the entity which was swapped into the removed entity's position.
-    pub fn move_entity(&mut self, target: &mut ComponentStorage, index: usize) -> Option<Entity> {
-        debug_assert!(index < self.len());
+    pub fn move_entity(
+        &mut self,
+        target: &mut ComponentStorage,
+        index: ComponentIndex,
+    ) -> Option<Entity> {
+        debug_assert!(*index < self.len());
         debug_assert!(!target.is_full());
         if !target.is_allocated() {
             target.allocate();
         }
 
-        trace!(index, source = ?self.id, destination = ?target.id, "Moving entity");
+        trace!(index = *index, source = ?self.id, destination = ?target.id, "Moving entity");
 
-        let entity = unsafe { *self.entities.get_unchecked(index) };
+        let entity = unsafe { *self.entities.get_unchecked(*index) };
         target.entities.push(entity);
 
         let self_components = unsafe { &mut *self.component_info.get() };
@@ -1360,9 +1501,9 @@ impl ComponentStorage {
         for (comp_type, accessor) in self_components.iter_mut() {
             if let Some(target_accessor) = target_components.get_mut(*comp_type) {
                 // move the component into the target chunk
-                let (ptr, element_size, _) = accessor.data_raw();
                 unsafe {
-                    let component = ptr.add(element_size * index);
+                    let (ptr, element_size, _) = accessor.data_raw();
+                    let component = ptr.add(element_size * *index);
                     target_accessor
                         .writer()
                         .push_raw(NonNull::new_unchecked(component), 1);
@@ -1403,9 +1544,9 @@ impl ComponentStorage {
 
         trace!(
             world = self.id.archetype_id().world().index(),
-            archetype = self.id.archetype_id().index(),
-            chunkset = self.id.set(),
-            chunk = self.id.index(),
+            archetype = *self.id.archetype_id().index(),
+            chunkset = *self.id.set(),
+            chunk = *self.id.index(),
             layout = ?self.component_layout,
             "Freeing chunk memory"
         );
@@ -1429,9 +1570,9 @@ impl ComponentStorage {
 
         trace!(
             world = self.id.archetype_id().world().index(),
-            archetype = self.id.archetype_id().index(),
-            chunkset = self.id.set(),
-            chunk = self.id.index(),
+            archetype = *self.id.archetype_id().index(),
+            chunkset = *self.id.set(),
+            chunk = *self.id.index(),
             layout = ?self.component_layout,
             "Allocating chunk memory"
         );
@@ -1444,8 +1585,8 @@ impl ComponentStorage {
 
             // update accessor pointers
             for (type_id, component) in (&mut *self.component_info.get()).iter_mut() {
-                let offset = self.component_offsets.get(type_id).unwrap();
-                *component.ptr.get_mut() = ptr.add(*offset);
+                let &offset = self.component_offsets.get(type_id).unwrap();
+                *component.ptr.get_mut() = ptr.add(offset);
             }
         }
 
@@ -1523,7 +1664,7 @@ pub struct ComponentResourceSet {
 
 impl ComponentResourceSet {
     /// Gets the version of the component slice.
-    pub fn version(&self) -> u64 { unsafe { (*self.version.get()) } }
+    pub fn version(&self) -> u64 { unsafe { *self.version.get() } }
 
     /// Gets a raw pointer to the start of the component slice.
     ///
@@ -1531,12 +1672,10 @@ impl ComponentResourceSet {
     ///
     /// # Safety
     ///
-    /// Access to the component data within the slice is runtime borrow checked.
-    /// This call will panic if borrowing rules are broken.
-    pub fn data_raw(&self) -> (Ref<*mut u8>, usize, usize) {
-        (self.ptr.get(), self.element_size, unsafe {
-            *self.count.get()
-        })
+    /// Access to the component data within the slice is runtime borrow checked in debug builds.
+    /// This call will panic if borrowing rules are broken in debug, and is undefined behavior in release.
+    pub unsafe fn data_raw(&self) -> (Ref<*mut u8>, usize, usize) {
+        (self.ptr.get(), self.element_size, *self.count.get())
     }
 
     /// Gets a raw pointer to the start of the component slice.
@@ -1545,21 +1684,19 @@ impl ComponentResourceSet {
     ///
     /// # Safety
     ///
-    /// Access to the component data within the slice is runtime borrow checked.
-    /// This call will panic if borrowing rules are broken.
+    /// Access to the component data within the slice is runtime borrow checked in debug builds.
+    /// This call will panic if borrowing rules are broken in debug, and is undefined behavior in release.
     ///
     /// # Panics
     ///
     /// Will panic when an internal u64 counter overflows.
     /// It will happen in 50000 years if you do 10000 mutations a millisecond.
-    pub fn data_raw_mut(&self) -> (RefMut<*mut u8>, usize, usize) {
+    pub unsafe fn data_raw_mut(&self) -> (RefMut<*mut u8>, usize, usize) {
         // this version increment is not thread safe
         // - but the pointer `get_mut` ensures exclusive access at runtime
         let ptr = self.ptr.get_mut();
-        unsafe {
-            *self.version.get() = next_version();
-        };
-        (ptr, self.element_size, unsafe { *self.count.get() })
+        *self.version.get() = next_version();
+        (ptr, self.element_size, *self.count.get())
     }
 
     /// Gets a shared reference to the slice of components.
@@ -1572,7 +1709,7 @@ impl ComponentResourceSet {
     /// This call will panic if borrowing rules are broken.
     pub unsafe fn data_slice<T>(&self) -> RefMap<&[T]> {
         let (ptr, _size, count) = self.data_raw();
-        ptr.map_into(|ptr| std::slice::from_raw_parts(*ptr as *const _ as *const T, count))
+        ptr.map_into(|&ptr| std::slice::from_raw_parts(ptr as *const _ as *const T, count))
     }
 
     /// Gets a mutable reference to the slice of components.
@@ -1590,7 +1727,7 @@ impl ComponentResourceSet {
     /// It will happen in 50000 years if you do 10000 mutations a millisecond.
     pub unsafe fn data_slice_mut<T>(&self) -> RefMapMut<&mut [T]> {
         let (ptr, _size, count) = self.data_raw_mut();
-        ptr.map_into(|ptr| std::slice::from_raw_parts_mut(*ptr as *mut _ as *mut T, count))
+        ptr.map_into(|&mut ptr| std::slice::from_raw_parts_mut(ptr as *mut _ as *mut T, count))
     }
 
     /// Creates a writer for pushing components into or removing from the vec.
@@ -1718,7 +1855,7 @@ impl<'a> ComponentWriter<'a> {
     /// # Safety
     ///
     /// Ensure that this function is only ever called once on a given index.
-    pub unsafe fn drop_in_place(&mut self, index: usize) {
+    pub unsafe fn drop_in_place(&mut self, ComponentIndex(index): ComponentIndex) {
         if let Some(drop_fn) = self.accessor.drop_fn {
             let size = self.accessor.element_size;
             let to_remove = self.ptr.add(size * index);
@@ -1951,10 +2088,9 @@ mod test {
 
         let chunk_index = data.get_free_chunk(set, 1);
         let components = data
-            .chunksets_mut()
-            .get_mut(set)
+            .chunkset_mut(set)
             .unwrap()
-            .get_mut(chunk_index)
+            .chunk_mut(chunk_index)
             .unwrap();
         let mut writer = components.writer();
         let (chunk_entities, chunk_components) = writer.get();
@@ -1986,10 +2122,9 @@ mod test {
 
         let chunk_index = data.get_free_chunk(set, 1);
         let chunk = data
-            .chunksets_mut()
-            .get_mut(set)
+            .chunkset_mut(set)
             .unwrap()
-            .get_mut(chunk_index)
+            .chunk_mut(chunk_index)
             .unwrap();
 
         assert!(!chunk.is_allocated());
@@ -2016,10 +2151,9 @@ mod test {
 
         let chunk_index = data.get_free_chunk(set, 1);
         let chunk = data
-            .chunksets_mut()
-            .get_mut(set)
+            .chunkset_mut(set)
             .unwrap()
-            .get_mut(chunk_index)
+            .chunk_mut(chunk_index)
             .unwrap();
 
         assert!(!chunk.is_allocated());
@@ -2040,7 +2174,7 @@ mod test {
 
         assert!(chunk.is_allocated());
 
-        chunk.swap_remove(0, true);
+        chunk.swap_remove(ComponentIndex(0), true);
 
         assert!(!chunk.is_allocated());
     }
@@ -2060,10 +2194,9 @@ mod test {
         let set = data.alloc_chunk_set(|_| {});
         let chunk_index = data.get_free_chunk(set, 1);
         let components = data
-            .chunksets_mut()
-            .get_mut(set)
+            .chunkset_mut(set)
             .unwrap()
-            .get_mut(chunk_index)
+            .chunk_mut(chunk_index)
             .unwrap();
 
         let entities = [
@@ -2191,10 +2324,9 @@ mod test {
 
         let chunk_index = data.get_free_chunk(set, 1);
         let components = data
-            .chunksets_mut()
-            .get_mut(set)
+            .chunkset_mut(set)
             .unwrap()
-            .get_mut(chunk_index)
+            .chunk_mut(chunk_index)
             .unwrap();
         let mut writer = components.writer();
         let (chunk_entities, chunk_components) = writer.get();
@@ -2226,10 +2358,9 @@ mod test {
 
         let chunk_index = data.get_free_chunk(set, 1);
         let components = data
-            .chunksets_mut()
-            .get_mut(set)
+            .chunkset_mut(set)
             .unwrap()
-            .get_mut(chunk_index)
+            .chunk_mut(chunk_index)
             .unwrap();
         let mut writer = components.writer();
         let (chunk_entities, chunk_components) = writer.get();
