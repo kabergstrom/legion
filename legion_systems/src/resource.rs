@@ -1,7 +1,7 @@
-use crate::borrow::{AtomicRefCell, Ref, RefMut};
-use crate::query::{Read, Write};
 use downcast_rs::{impl_downcast, Downcast};
 use fxhash::FxHashMap;
+use legion_core::borrow::{AtomicRefCell, Ref, RefMut};
+use legion_core::query::{Read, ReadOnly, Write};
 use std::{
     any::TypeId,
     marker::PhantomData,
@@ -39,13 +39,14 @@ impl ResourceTypeId {
 /// struct TypeA(usize);
 /// struct TypeB(usize);
 ///
-/// use legion::prelude::*;
+/// use legion_core::prelude::*;
+/// use legion_systems::prelude::*;
 /// let mut resources = Resources::default();
 /// resources.insert(TypeA(55));
 /// resources.insert(TypeB(12));
 ///
 /// {
-///     let (a, mut b) = <(Read<TypeA>, Write<TypeB>)>::fetch(&resources);
+///     let (a, mut b) = <(Read<TypeA>, Write<TypeB>)>::fetch_mut(&mut resources);
 ///     assert_ne!(a.0, b.0);
 ///     b.0 = a.0;
 /// }
@@ -59,7 +60,24 @@ impl ResourceTypeId {
 pub trait ResourceSet: Send + Sync {
     type PreparedResources;
 
-    fn fetch(resources: &Resources) -> Self::PreparedResources;
+    /// Fetches all defined resources, without checking mutability.
+    ///
+    /// # Safety
+    /// It is up to the end user to validate proper mutability rules across the resources being accessed.
+    ///
+    unsafe fn fetch_unchecked(resources: &Resources) -> Self::PreparedResources;
+
+    fn fetch_mut(resources: &mut Resources) -> Self::PreparedResources {
+        // safe because mutable borrow ensures exclusivity
+        unsafe { Self::fetch_unchecked(resources) }
+    }
+
+    fn fetch(resources: &Resources) -> Self::PreparedResources
+    where
+        Self: ReadOnly,
+    {
+        unsafe { Self::fetch_unchecked(resources) }
+    }
 }
 
 /// Blanket trait for resource types.
@@ -302,32 +320,42 @@ impl Resources {
             _marker: Default::default(),
         })
     }
+
+    /// Performs merging of two resource storages, which occurs during a world merge.
+    /// This merge will retain any already-existant resources in the local world, while moving any
+    /// new resources from the source world into this one, consuming the resources.
+    pub fn merge(&mut self, mut other: Resources) {
+        // Merge resources, retaining our local ones but moving in any non-existant ones
+        for resource in other.storage.drain() {
+            self.storage.entry(resource.0).or_insert(resource.1);
+        }
+    }
 }
 
 impl ResourceSet for () {
     type PreparedResources = ();
 
-    fn fetch(_: &Resources) {}
+    unsafe fn fetch_unchecked(_: &Resources) {}
 }
 
 impl<T: Resource> ResourceSet for Read<T> {
     type PreparedResources = PreparedRead<T>;
 
-    fn fetch(resources: &Resources) -> Self::PreparedResources {
+    unsafe fn fetch_unchecked(resources: &Resources) -> Self::PreparedResources {
         let resource = resources
             .get::<T>()
             .unwrap_or_else(|| panic!("Failed to fetch resource!: {}", std::any::type_name::<T>()));
-        unsafe { PreparedRead::new(resource.deref() as *const T) }
+        PreparedRead::new(resource.deref() as *const T)
     }
 }
 impl<T: Resource> ResourceSet for Write<T> {
     type PreparedResources = PreparedWrite<T>;
 
-    fn fetch(resources: &Resources) -> Self::PreparedResources {
+    unsafe fn fetch_unchecked(resources: &Resources) -> Self::PreparedResources {
         let mut resource = resources
             .get_mut::<T>()
             .unwrap_or_else(|| panic!("Failed to fetch resource!: {}", std::any::type_name::<T>()));
-        unsafe { PreparedWrite::new(resource.deref_mut() as *mut T) }
+        PreparedWrite::new(resource.deref_mut() as *mut T)
     }
 }
 
@@ -338,9 +366,9 @@ macro_rules! impl_resource_tuple {
         {
             type PreparedResources = ($( $ty::PreparedResources, )*);
 
-            fn fetch(resources: &Resources) -> Self::PreparedResources {
-                ($( $ty::fetch(resources), )*)
-             }
+            unsafe fn fetch_unchecked(resources: &Resources) -> Self::PreparedResources {
+                ($( $ty::fetch_unchecked(resources), )*)
+            }
         }
     };
 }
