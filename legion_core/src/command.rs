@@ -62,8 +62,12 @@ where
         );
     }
 
-    fn write_components(&self) -> Vec<ComponentTypeId> { self.write_components.clone() }
-    fn write_tags(&self) -> Vec<TagTypeId> { self.write_tags.clone() }
+    fn write_components(&self) -> Vec<ComponentTypeId> {
+        self.write_components.clone()
+    }
+    fn write_tags(&self) -> Vec<TagTypeId> {
+        self.write_tags.clone()
+    }
 }
 
 #[derive(Derivative)]
@@ -87,18 +91,28 @@ where
         world.insert(consumed.tags, consumed.components);
     }
 
-    fn write_components(&self) -> Vec<ComponentTypeId> { self.write_components.clone() }
-    fn write_tags(&self) -> Vec<TagTypeId> { self.write_tags.clone() }
+    fn write_components(&self) -> Vec<ComponentTypeId> {
+        self.write_components.clone()
+    }
+    fn write_tags(&self) -> Vec<TagTypeId> {
+        self.write_tags.clone()
+    }
 }
 
 #[derive(Derivative)]
 #[derivative(Debug(bound = ""))]
 struct DeleteEntityCommand(Entity);
 impl WorldWritable for DeleteEntityCommand {
-    fn write(self: Arc<Self>, world: &mut World, _: &CommandBuffer) { world.delete(self.0); }
+    fn write(self: Arc<Self>, world: &mut World, _: &CommandBuffer) {
+        world.delete(self.0);
+    }
 
-    fn write_components(&self) -> Vec<ComponentTypeId> { Vec::with_capacity(0) }
-    fn write_tags(&self) -> Vec<TagTypeId> { Vec::with_capacity(0) }
+    fn write_components(&self) -> Vec<ComponentTypeId> {
+        Vec::with_capacity(0)
+    }
+    fn write_tags(&self) -> Vec<TagTypeId> {
+        Vec::with_capacity(0)
+    }
 }
 
 #[derive(Derivative)]
@@ -119,8 +133,12 @@ where
         }
     }
 
-    fn write_components(&self) -> Vec<ComponentTypeId> { Vec::with_capacity(0) }
-    fn write_tags(&self) -> Vec<TagTypeId> { vec![TagTypeId::of::<T>()] }
+    fn write_components(&self) -> Vec<ComponentTypeId> {
+        Vec::with_capacity(0)
+    }
+    fn write_tags(&self) -> Vec<TagTypeId> {
+        vec![TagTypeId::of::<T>()]
+    }
 }
 
 #[derive(Derivative)]
@@ -139,8 +157,12 @@ where
         }
     }
 
-    fn write_components(&self) -> Vec<ComponentTypeId> { Vec::with_capacity(0) }
-    fn write_tags(&self) -> Vec<TagTypeId> { vec![TagTypeId::of::<T>()] }
+    fn write_components(&self) -> Vec<ComponentTypeId> {
+        Vec::with_capacity(0)
+    }
+    fn write_tags(&self) -> Vec<TagTypeId> {
+        vec![TagTypeId::of::<T>()]
+    }
 }
 
 #[derive(Derivative)]
@@ -162,8 +184,12 @@ where
         }
     }
 
-    fn write_components(&self) -> Vec<ComponentTypeId> { vec![ComponentTypeId::of::<C>()] }
-    fn write_tags(&self) -> Vec<TagTypeId> { Vec::with_capacity(0) }
+    fn write_components(&self) -> Vec<ComponentTypeId> {
+        vec![ComponentTypeId::of::<C>()]
+    }
+    fn write_tags(&self) -> Vec<TagTypeId> {
+        Vec::with_capacity(0)
+    }
 }
 
 #[derive(Derivative)]
@@ -182,8 +208,12 @@ where
         }
     }
 
-    fn write_components(&self) -> Vec<ComponentTypeId> { vec![ComponentTypeId::of::<C>()] }
-    fn write_tags(&self) -> Vec<TagTypeId> { Vec::with_capacity(0) }
+    fn write_components(&self) -> Vec<ComponentTypeId> {
+        vec![ComponentTypeId::of::<C>()]
+    }
+    fn write_tags(&self) -> Vec<TagTypeId> {
+        Vec::with_capacity(0)
+    }
 }
 
 #[allow(clippy::enum_variant_names)]
@@ -367,7 +397,9 @@ impl CommandBuffer {
     }
 
     /// Gets the ID of the world this command buffer belongs to.
-    pub fn world(&self) -> WorldId { self.world_id }
+    pub fn world(&self) -> WorldId {
+        self.world_id
+    }
 
     /// Changes the cached capacity of this `CommandBuffer` to the specified capacity. This includes shrinking
     /// and growing the allocated entities, and possibly returning them to the entity allocator in the
@@ -494,7 +526,9 @@ impl CommandBuffer {
     }
 
     /// Queues the deletion of an entity in the command buffer. This writer calls `World::delete`
-    pub fn delete(&self, entity: Entity) { self.insert_writer(DeleteEntityCommand(entity)); }
+    pub fn delete(&self, entity: Entity) {
+        self.insert_writer(DeleteEntityCommand(entity));
+    }
 
     /// Queues the addition of a component from an entity in the command buffer.
     /// This writer calls `World::add_component`
@@ -528,11 +562,15 @@ impl CommandBuffer {
 
     /// Returns the current number of commands already queued in this `CommandBuffer` instance.
     #[inline]
-    pub fn len(&self) -> usize { self.commands.get().len() }
+    pub fn len(&self) -> usize {
+        self.commands.get().len()
+    }
 
     /// Returns true if this `CommandBuffer` is currently empty and contains no writers.
     #[inline]
-    pub fn is_empty(&self) -> bool { self.commands.get().len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.commands.get().len() == 0
+    }
 }
 
 impl Drop for CommandBuffer {
@@ -585,7 +623,7 @@ mod tests {
         let query = Read::<Pos>::query();
 
         let mut count = 0;
-        for _ in query.iter_entities(&mut world) {
+        for _ in query.iter_entities(&world) {
             count += 1;
         }
 
