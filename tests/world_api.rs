@@ -85,7 +85,7 @@ fn get_shared() {
     ];
 
     let mut entities: Vec<Entity> = Vec::new();
-    for e in world.insert(shared, components.clone()) {
+    for e in world.insert(shared, components) {
         entities.push(*e);
     }
 
@@ -121,7 +121,7 @@ fn delete() {
     ];
 
     let mut entities: Vec<Entity> = Vec::new();
-    for e in world.insert(shared, components.clone()) {
+    for e in world.insert(shared, components) {
         entities.push(*e);
     }
 
@@ -423,6 +423,8 @@ fn mutate_change_tag() {
     assert_eq!(2, query_model_5.iter(&world).count());
 }
 
+// This test repeatedly creates a world with new entities and drops it, reproducing
+// https://github.com/TomGillen/legion/issues/92
 #[test]
 fn lots_of_deletes() {
     let _ = tracing_subscriber::fmt::try_init();
@@ -438,6 +440,6 @@ fn lots_of_deletes() {
         ];
 
         let mut world = universe.create_world();
-        let entities = world.insert(shared, components).to_vec();
+        world.insert(shared, components).to_vec();
     }
 }
